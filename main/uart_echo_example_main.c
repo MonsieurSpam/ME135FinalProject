@@ -16,6 +16,9 @@
 #include "driver/uart.h"
 #include "driver/gpio.h"
 #include "nvs_flash.h"
+#include "esp_console.h"
+#include "esp_vfs_dev.h"
+#include "linenoise/linenoise.h"
 
 // Constant definitions
 #define PACKET_MAX_LENGTH 256  // Maximum length of Dynamixel packet
@@ -35,6 +38,11 @@
 #define BAUDRATE        1000000
 #define DXL_ID          1
 #define PROTOCOL_VERSION 2.0
+
+// Position limits
+#define MIN_SAFE_POSITION 1900
+#define MAX_SAFE_POSITION 2100
+#define CENTER_POSITION  2048
 
 // Dynamixel memory addresses
 #define ADDR_TORQUE_ENABLE      64
@@ -259,7 +267,6 @@ static int read_status_packet(uint8_t *error, uint8_t *param_buffer, uint16_t *p
     // Buffer for received data
     uint8_t rxpacket[PACKET_MAX_LENGTH] = {0};
     uint16_t rx_index = 0;
-    uint8_t rx_data;
     
     // Wait for data with timeout
     const int MAX_RETRIES = 100; // 1 second timeout (10ms checks)
@@ -303,7 +310,7 @@ static int read_status_packet(uint8_t *error, uint8_t *param_buffer, uint16_t *p
     }
     
     // Extract parameters
-    uint8_t id = rxpacket[4];
+    // uint8_t id = rxpacket[4]; - unused, commenting out to fix warning
     uint16_t length = DXL_MAKEWORD(rxpacket[5], rxpacket[6]);
     uint8_t instruction = rxpacket[7];
     *error = rxpacket[8];
@@ -436,12 +443,6 @@ static bool write_4bytes(uint16_t address, uint32_t data)
     return write_register(address, data_array, 4);
 }
 
-// Read a single byte
-static bool read_1byte(uint16_t address, uint8_t *data)
-{
-    return read_register(address, 1, data);
-}
-
 // Read 4 bytes (for position, etc.)
 static bool read_4bytes(uint16_t address, uint32_t *data)
 {
@@ -501,6 +502,71 @@ static bool read_position(uint32_t *position)
     return result;
 }
 
+// Initialize console for input
+static void init_console(void)
+{
+    // Initialize VFS & UART so we can use std::cout/cin
+    setvbuf(stdin, NULL, _IONBF, 0);
+    setvbuf(stdout, NULL, _IONBF, 0);
+    
+    // Install UART driver for console I/O
+    const uart_config_t uart_config = {
+        .baud_rate = 115200,  // Default console baud rate
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .source_clk = UART_SCLK_DEFAULT,
+    };
+    
+    // Use UART0 (console UART)
+    ESP_ERROR_CHECK(uart_driver_install(UART_NUM_0, 256, 0, 0, NULL, 0));
+    ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
+    
+    // Redirect stdin/stdout to UART
+    esp_vfs_dev_uart_use_driver(UART_NUM_0);
+
+    /* Initialize the console */
+    esp_console_config_t console_config = {
+        .max_cmdline_length = 256,
+        .max_cmdline_args = 8,
+        .hint_color = 36  // Cyan color (ANSI color code)
+    };
+    ESP_ERROR_CHECK(esp_console_init(&console_config));
+
+    /* Configure linenoise line completion library */
+    /* Enable multiline editing. */
+    linenoiseSetMultiLine(1);
+
+    /* Tell linenoise where to get command completions and hints */
+    linenoiseSetCompletionCallback(NULL);
+    linenoiseSetHintsCallback(NULL);
+
+    /* Set command history size */
+    linenoiseHistorySetMaxLen(100);
+}
+
+// Function to read character input from console in non-blocking mode
+static int read_key_from_uart(void)
+{
+    // Check if input is available
+    fd_set rfds;
+    struct timeval tv = {
+        .tv_sec = 0,
+        .tv_usec = 0,
+    };
+    
+    FD_ZERO(&rfds);
+    FD_SET(fileno(stdin), &rfds);
+    
+    int ret = select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
+    if (ret > 0) {
+        return fgetc(stdin);
+    }
+    
+    return -1; // No data available
+}
+
 // Main Dynamixel control task
 static void dynamixel_task(void *pvParameters)
 {
@@ -531,31 +597,145 @@ static void dynamixel_task(void *pvParameters)
             if (enable_torque()) {
                 ESP_LOGI(TAG, "Torque enabled");
                 
-                // Main control loop - move between positions
-                uint32_t positions[] = {1000, 3000, 2048}; // Min, Max, Center
-                int pos_index = 0;
+                // Interactive keyboard control mode
+                uint32_t current_position = 2048; // Start at center position
+                uint32_t step_size = 20;         // Default step size
                 
+                // Set initial position
+                if (set_position(current_position)) {
+                    ESP_LOGI(TAG, "Set initial position to: %" PRIu32, current_position);
+                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    read_position(&current_position);
+                }
+                
+                printf("\n\n===== Dynamixel Servo Control =====\n");
+                printf("Use the following keys to control the servo (in terminal):\n");
+                printf("Arrow Up/Down or W/S: Increase/decrease position\n");
+                printf("Arrow Left/Right or A/D: Decrease/increase step size\n");
+                printf("C: Center position (%d)\n", CENTER_POSITION);
+                printf("M: Minimum safe position (%d)\n", MIN_SAFE_POSITION);
+                printf("X: Maximum safe position (%d)\n", MAX_SAFE_POSITION);
+                printf("Q: Return to center\n");
+                printf("\nNote: Input is read from the terminal. Make sure to click in the terminal window.\n");
+                printf("Current position: %" PRIu32 ", Step size: %" PRIu32 "\n", current_position, step_size);
+                
+                // Main control loop
                 while (1) {
-                    uint32_t position = positions[pos_index];
-                    
-                    if (set_position(position)) {
-                        ESP_LOGI(TAG, "Set position to: %" PRIu32, position);
+                    // Check for keyboard input
+                    int ch = read_key_from_uart();
+                    if (ch != -1) {
+                        bool position_changed = false;
                         
-                        // Wait for movement
-                        vTaskDelay(pdMS_TO_TICKS(2000));
-                        
-                        // Read current position
-                        uint32_t current_position = 0;
-                        if (read_position(&current_position)) {
-                            ESP_LOGI(TAG, "Position confirmed: %" PRIu32, current_position);
+                        // Special key handling (arrow keys send escape sequences)
+                        if (ch == 27) { // ESC
+                            // Short delay to ensure the entire escape sequence is received
+                            vTaskDelay(pdMS_TO_TICKS(10));
+                            
+                            // Read the next characters in the escape sequence
+                            ch = read_key_from_uart();
+                            if (ch == '[') {
+                                ch = read_key_from_uart();
+                                
+                                switch (ch) {
+                                    case 'A': // Up arrow
+                                        current_position += step_size;
+                                        if (current_position > 4095) current_position = 4095;
+                                        position_changed = true;
+                                        printf("Increasing position to: %" PRIu32 "\n", current_position);
+                                        break;
+                                        
+                                    case 'B': // Down arrow
+                                        if (current_position > step_size) {
+                                            current_position -= step_size;
+                                        } else {
+                                            current_position = 0;
+                                        }
+                                        position_changed = true;
+                                        printf("Decreasing position to: %" PRIu32 "\n", current_position);
+                                        break;
+                                        
+                                    case 'C': // Right arrow
+                                        step_size *= 2;
+                                        if (step_size > 200) step_size = 200;
+                                        printf("Increased step size to: %" PRIu32 "\n", step_size);
+                                        break;
+                                        
+                                    case 'D': // Left arrow
+                                        step_size /= 2;
+                                        if (step_size < 1) step_size = 1;
+                                        printf("Decreased step size to: %" PRIu32 "\n", step_size);
+                                        break;
+                                }
+                            }
+                        } else if (ch == 'q' || ch == 'Q') {
+                            // Return to center on quit
+                            current_position = 2048;
+                            position_changed = true;
+                            printf("Returning to center position\n");
+                        } else if (ch == 'w' || ch == 'W') {
+                            // Up (alternative to arrow key)
+                            current_position += step_size;
+                            if (current_position > 4095) current_position = 4095;
+                            position_changed = true;
+                            printf("Increasing position to: %" PRIu32 "\n", current_position);
+                        } else if (ch == 's' || ch == 'S') {
+                            // Down (alternative to arrow key)
+                            if (current_position > step_size) {
+                                current_position -= step_size;
+                            } else {
+                                current_position = 0;
+                            }
+                            position_changed = true;
+                            printf("Decreasing position to: %" PRIu32 "\n", current_position);
+                        } else if (ch == 'a' || ch == 'A') {
+                            // Left (alternative to arrow key)
+                            step_size /= 2;
+                            if (step_size < 1) step_size = 1;
+                            printf("Decreased step size to: %" PRIu32 "\n", step_size);
+                        } else if (ch == 'd' || ch == 'D') {
+                            // Right (alternative to arrow key)
+                            step_size *= 2;
+                            if (step_size > 200) step_size = 200;
+                            printf("Increased step size to: %" PRIu32 "\n", step_size);
+                        } else if (ch == 'c' || ch == 'C') {
+                            // Center position
+                            current_position = CENTER_POSITION;
+                            position_changed = true;
+                            printf("Moving to center position (%d)\n", CENTER_POSITION);
+                        } else if (ch == 'm' || ch == 'M') {
+                            // Min position
+                            current_position = MIN_SAFE_POSITION;
+                            position_changed = true;
+                            printf("Moving to minimum safe position (%d)\n", MIN_SAFE_POSITION);
+                            printf("Moving to minimum position (0)\n");
+                        } else if (ch == 'x' || ch == 'X') {
+                            // Max position
+                            current_position = 4095;
+                            position_changed = true;
+                            printf("Moving to maximum position (4095)\n");
                         }
-                    } else {
-                        ESP_LOGE(TAG, "Failed to set position");
+                        
+                        // Update servo position if needed
+                        if (position_changed) {
+                            if (set_position(current_position)) {
+                                ESP_LOGI(TAG, "Set position to: %" PRIu32, current_position);
+                                
+                                // Wait for movement to complete
+                                vTaskDelay(pdMS_TO_TICKS(500));
+                                
+                                // Verify position
+                                uint32_t read_pos = 0;
+                                if (read_position(&read_pos)) {
+                                    ESP_LOGI(TAG, "Position confirmed: %" PRIu32, read_pos);
+                                }
+                            } else {
+                                ESP_LOGE(TAG, "Failed to set position");
+                            }
+                        }
                     }
                     
-                    // Move to next position
-                    pos_index = (pos_index + 1) % 3;
-                    vTaskDelay(pdMS_TO_TICKS(1000));
+                    // Small delay to prevent CPU hogging
+                    vTaskDelay(pdMS_TO_TICKS(50));
                 }
             } else {
                 ESP_LOGE(TAG, "Failed to enable torque");
@@ -580,6 +760,9 @@ void app_main(void)
         ret = nvs_flash_init();
     }
     ESP_ERROR_CHECK(ret);
+    
+    // Initialize console for input
+    init_console();
     
     ESP_LOGI(TAG, "ESP32 Dynamixel Controller");
     ESP_LOGI(TAG, "Simplified version for ID 1 only");
