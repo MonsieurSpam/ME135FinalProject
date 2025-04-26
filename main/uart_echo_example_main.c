@@ -18,6 +18,7 @@
 #include "nvs_flash.h"
 #include "esp_console.h"
 #include "esp_vfs_dev.h"
+#include "driver/uart_vfs.h"
 #include "linenoise/linenoise.h"
 
 // Constant definitions
@@ -35,9 +36,10 @@
 #define RX_MODE 0
 
 // Dynamixel settings
-#define BAUDRATE        1000000
-#define DXL_ID          1
+#define BAUDRATE        1000000  // Using standard baudrate for better compatibility
+#define NUM_SERVOS      6     // Number of servos to control
 #define PROTOCOL_VERSION 2.0
+#define DXL_ID          1      // Default ID for backward compatibility with original functions
 
 // Position limits
 #define MIN_SAFE_POSITION 1900
@@ -524,7 +526,7 @@ static void init_console(void)
     ESP_ERROR_CHECK(uart_param_config(UART_NUM_0, &uart_config));
     
     // Redirect stdin/stdout to UART
-    esp_vfs_dev_uart_use_driver(UART_NUM_0);
+    uart_vfs_dev_use_driver(UART_NUM_0);
 
     /* Initialize the console */
     esp_console_config_t console_config = {
@@ -567,187 +569,333 @@ static int read_key_from_uart(void)
     return -1; // No data available
 }
 
+// Function to scan for multiple servos
+static int scan_servos(uint8_t *found_ids, uint16_t *model_numbers, int max_servos) {
+    int found_count = 0;
+    
+    ESP_LOGI(TAG, "Starting servo scan (IDs 1-%d)...", max_servos);
+    
+    // Loop through potential IDs
+    for (uint8_t id = 1; id <= max_servos; id++) {
+        ESP_LOGI(TAG, "Pinging servo ID %d", id);
+        
+        // Send ping packet
+        uint8_t *parameters = NULL; // No parameters for ping
+        send_packet(id, INST_PING, parameters, 0);
+        
+        // Process response
+        uint8_t error = 0;
+        uint8_t params[16] = {0};
+        uint16_t param_length = 0;
+        
+        int result = read_status_packet(&error, params, &param_length);
+        if (result == COMM_SUCCESS) {
+            uint16_t model_number = 0;
+            if (param_length >= 2) {
+                model_number = DXL_MAKEWORD(params[0], params[1]);
+            }
+            
+            ESP_LOGI(TAG, "Found servo ID %d, model number: %d", id, model_number);
+            
+            if (found_count < max_servos) {
+                found_ids[found_count] = id;
+                model_numbers[found_count] = model_number;
+                found_count++;
+            }
+        } else {
+            ESP_LOGW(TAG, "No response from servo ID %d", id);
+        }
+        
+        // Small delay between pings
+        vTaskDelay(pdMS_TO_TICKS(100));
+    }
+    
+    ESP_LOGI(TAG, "Scan complete. Found %d servos.", found_count);
+    return found_count;
+}
+
+// Set position for a specific servo
+static bool set_servo_position(uint8_t id, uint32_t position) {
+    ESP_LOGI(TAG, "Moving servo ID %d to position: %" PRIu32, id, position);
+    
+    uint8_t parameters[4 + 2];  // Address(2) + Position(4)
+    parameters[0] = DXL_LOBYTE(ADDR_GOAL_POSITION);
+    parameters[1] = DXL_HIBYTE(ADDR_GOAL_POSITION);
+    parameters[2] = DXL_LOBYTE(DXL_LOWORD(position));
+    parameters[3] = DXL_HIBYTE(DXL_LOWORD(position));
+    parameters[4] = DXL_LOBYTE(DXL_HIWORD(position));
+    parameters[5] = DXL_HIBYTE(DXL_HIWORD(position));
+    
+    send_packet(id, INST_WRITE, parameters, 6);
+    
+    uint8_t error = 0;
+    uint8_t recv_params[16] = {0};
+    uint16_t recv_length = 0;
+    
+    int result = read_status_packet(&error, recv_params, &recv_length);
+    
+    if (result == COMM_SUCCESS && error == 0) {
+        ESP_LOGI(TAG, "Servo ID %d moved successfully", id);
+        return true;
+    } else {
+        ESP_LOGE(TAG, "Failed to move servo ID %d, error: %d, comm result: %d", id, error, result);
+        return false;
+    }
+}
+
+// Enable torque for a specific servo
+static bool enable_servo_torque(uint8_t id) {
+    ESP_LOGI(TAG, "Enabling torque for servo ID %d", id);
+    
+    uint8_t parameters[3];  // Address(2) + Data(1)
+    parameters[0] = DXL_LOBYTE(ADDR_TORQUE_ENABLE);
+    parameters[1] = DXL_HIBYTE(ADDR_TORQUE_ENABLE);
+    parameters[2] = TORQUE_ENABLE;
+    
+    send_packet(id, INST_WRITE, parameters, 3);
+    
+    uint8_t error = 0;
+    uint8_t recv_params[16] = {0};
+    uint16_t recv_length = 0;
+    
+    int result = read_status_packet(&error, recv_params, &recv_length);
+    
+    if (result == COMM_SUCCESS && error == 0) {
+        ESP_LOGI(TAG, "Torque enabled for servo ID %d", id);
+        return true;
+    } else {
+        ESP_LOGE(TAG, "Failed to enable torque for servo ID %d, error: %d", id, error);
+        return false;
+    }
+}
+
+// Set operating mode for a specific servo
+static bool set_servo_operating_mode(uint8_t id, uint8_t mode) {
+    ESP_LOGI(TAG, "Setting servo ID %d to mode %d", id, mode);
+    
+    // First disable torque
+    uint8_t parameters[3];
+    parameters[0] = DXL_LOBYTE(ADDR_TORQUE_ENABLE);
+    parameters[1] = DXL_HIBYTE(ADDR_TORQUE_ENABLE);
+    parameters[2] = TORQUE_DISABLE;
+    
+    send_packet(id, INST_WRITE, parameters, 3);
+    
+    uint8_t error = 0;
+    uint8_t recv_params[16] = {0};
+    uint16_t recv_length = 0;
+    
+    int result = read_status_packet(&error, recv_params, &recv_length);
+    
+    if (result != COMM_SUCCESS || error != 0) {
+        ESP_LOGE(TAG, "Failed to disable torque for servo ID %d", id);
+        return false;
+    }
+    
+    // Now set operating mode
+    parameters[0] = DXL_LOBYTE(ADDR_OPERATING_MODE);
+    parameters[1] = DXL_HIBYTE(ADDR_OPERATING_MODE);
+    parameters[2] = mode;
+    
+    send_packet(id, INST_WRITE, parameters, 3);
+    
+    error = 0;
+    recv_length = 0;
+    
+    result = read_status_packet(&error, recv_params, &recv_length);
+    
+    if (result == COMM_SUCCESS && error == 0) {
+        ESP_LOGI(TAG, "Operating mode set for servo ID %d", id);
+        return true;
+    } else {
+        ESP_LOGE(TAG, "Failed to set operating mode for servo ID %d", id);
+        return false;
+    }
+}
+
 // Main Dynamixel control task
 static void dynamixel_task(void *pvParameters)
 {
-    uint16_t model_number = 0;
-    bool ping_success = false;
+    uint16_t model_numbers[NUM_SERVOS] = {0};
+    uint8_t found_ids[NUM_SERVOS] = {0};
+    int found_count = 0;
     
     // Initial setup with baudrate
     init_uart(BAUDRATE);
     
-    // Try to ping the servo a few times
-    for (int retry = 0; retry < 5 && !ping_success; retry++) {
-        ESP_LOGI(TAG, "Ping attempt %d of 5", retry + 1);
-        ping_success = ping_dynamixel(&model_number);
-        if (ping_success) {
-            break;
-        }
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
+    ESP_LOGI(TAG, "Searching for servos...");
     
-    if (ping_success) {
-        ESP_LOGI(TAG, "Servo found with model number: %d", model_number);
+    // Scan for available servos
+    found_count = scan_servos(found_ids, model_numbers, NUM_SERVOS);
+    
+    if (found_count > 0) {
+        ESP_LOGI(TAG, "Found %d servos", found_count);
         
-        // Set operating mode to position control
-        if (set_operating_mode(POSITION_CONTROL_MODE)) {
-            ESP_LOGI(TAG, "Set operating mode to position control");
+        // Initialize each servo found
+        for (int i = 0; i < found_count; i++) {
+            uint8_t id = found_ids[i];
             
-            // Enable torque
-            if (enable_torque()) {
-                ESP_LOGI(TAG, "Torque enabled");
-                
-                // Interactive keyboard control mode
-                uint32_t current_position = 2048; // Start at center position
-                uint32_t step_size = 20;         // Default step size
-                
-                // Set initial position
-                if (set_position(current_position)) {
-                    ESP_LOGI(TAG, "Set initial position to: %" PRIu32, current_position);
-                    vTaskDelay(pdMS_TO_TICKS(1000));
-                    read_position(&current_position);
+            // Set to position control mode
+            if (set_servo_operating_mode(id, POSITION_CONTROL_MODE)) {
+                // Enable torque
+                if (enable_servo_torque(id)) {
+                    ESP_LOGI(TAG, "Servo ID %d initialized successfully", id);
+                } else {
+                    ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
                 }
-                
-                printf("\n\n===== Dynamixel Servo Control =====\n");
-                printf("Use the following keys to control the servo (in terminal):\n");
-                printf("Arrow Up/Down or W/S: Increase/decrease position\n");
-                printf("Arrow Left/Right or A/D: Decrease/increase step size\n");
-                printf("C: Center position (%d)\n", CENTER_POSITION);
-                printf("M: Minimum safe position (%d)\n", MIN_SAFE_POSITION);
-                printf("X: Maximum safe position (%d)\n", MAX_SAFE_POSITION);
-                printf("Q: Return to center\n");
-                printf("\nNote: Input is read from the terminal. Make sure to click in the terminal window.\n");
-                printf("Current position: %" PRIu32 ", Step size: %" PRIu32 "\n", current_position, step_size);
-                
-                // Main control loop
-                while (1) {
-                    // Check for keyboard input
-                    int ch = read_key_from_uart();
-                    if (ch != -1) {
-                        bool position_changed = false;
-                        
-                        // Special key handling (arrow keys send escape sequences)
-                        if (ch == 27) { // ESC
-                            // Short delay to ensure the entire escape sequence is received
-                            vTaskDelay(pdMS_TO_TICKS(10));
-                            
-                            // Read the next characters in the escape sequence
-                            ch = read_key_from_uart();
-                            if (ch == '[') {
-                                ch = read_key_from_uart();
-                                
-                                switch (ch) {
-                                    case 'A': // Up arrow
-                                        current_position += step_size;
-                                        if (current_position > 4095) current_position = 4095;
-                                        position_changed = true;
-                                        printf("Increasing position to: %" PRIu32 "\n", current_position);
-                                        break;
-                                        
-                                    case 'B': // Down arrow
-                                        if (current_position > step_size) {
-                                            current_position -= step_size;
-                                        } else {
-                                            current_position = 0;
-                                        }
-                                        position_changed = true;
-                                        printf("Decreasing position to: %" PRIu32 "\n", current_position);
-                                        break;
-                                        
-                                    case 'C': // Right arrow
-                                        step_size *= 2;
-                                        if (step_size > 200) step_size = 200;
-                                        printf("Increased step size to: %" PRIu32 "\n", step_size);
-                                        break;
-                                        
-                                    case 'D': // Left arrow
-                                        step_size /= 2;
-                                        if (step_size < 1) step_size = 1;
-                                        printf("Decreased step size to: %" PRIu32 "\n", step_size);
-                                        break;
-                                }
-                            }
-                        } else if (ch == 'q' || ch == 'Q') {
-                            // Return to center on quit
-                            current_position = 2048;
-                            position_changed = true;
-                            printf("Returning to center position\n");
-                        } else if (ch == 'w' || ch == 'W') {
-                            // Up (alternative to arrow key)
-                            current_position += step_size;
-                            if (current_position > 4095) current_position = 4095;
-                            position_changed = true;
-                            printf("Increasing position to: %" PRIu32 "\n", current_position);
-                        } else if (ch == 's' || ch == 'S') {
-                            // Down (alternative to arrow key)
-                            if (current_position > step_size) {
-                                current_position -= step_size;
-                            } else {
-                                current_position = 0;
-                            }
-                            position_changed = true;
-                            printf("Decreasing position to: %" PRIu32 "\n", current_position);
-                        } else if (ch == 'a' || ch == 'A') {
-                            // Left (alternative to arrow key)
-                            step_size /= 2;
-                            if (step_size < 1) step_size = 1;
-                            printf("Decreased step size to: %" PRIu32 "\n", step_size);
-                        } else if (ch == 'd' || ch == 'D') {
-                            // Right (alternative to arrow key)
-                            step_size *= 2;
-                            if (step_size > 200) step_size = 200;
-                            printf("Increased step size to: %" PRIu32 "\n", step_size);
-                        } else if (ch == 'c' || ch == 'C') {
-                            // Center position
-                            current_position = CENTER_POSITION;
-                            position_changed = true;
-                            printf("Moving to center position (%d)\n", CENTER_POSITION);
-                        } else if (ch == 'm' || ch == 'M') {
-                            // Min position
-                            current_position = MIN_SAFE_POSITION;
-                            position_changed = true;
-                            printf("Moving to minimum safe position (%d)\n", MIN_SAFE_POSITION);
-                            printf("Moving to minimum position (0)\n");
-                        } else if (ch == 'x' || ch == 'X') {
-                            // Max position
-                            current_position = 4095;
-                            position_changed = true;
-                            printf("Moving to maximum position (4095)\n");
+            } else {
+                ESP_LOGE(TAG, "Failed to set operating mode for servo ID %d", id);
+            }
+        }
+        
+        // Move each servo to center position
+        for (int i = 0; i < found_count; i++) {
+            set_servo_position(found_ids[i], CENTER_POSITION);
+            vTaskDelay(pdMS_TO_TICKS(500));
+        }
+        
+        ESP_LOGI(TAG, "All servos moved to center position");
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        // Small movement to validate servo control
+        const uint32_t positions[] = {
+            CENTER_POSITION - 50,  // Slightly left
+            CENTER_POSITION + 50,  // Slightly right
+            CENTER_POSITION        // Back to center
+        };
+        
+        ESP_LOGI(TAG, "Starting small movements to verify communication");
+        
+        // Perform small movements for each servo
+        for (int pos_idx = 0; pos_idx < 3; pos_idx++) {
+            ESP_LOGI(TAG, "Movement step %d: Position %" PRIu32, pos_idx + 1, positions[pos_idx]);
+            
+            for (int i = 0; i < found_count; i++) {
+                set_servo_position(found_ids[i], positions[pos_idx]);
+                vTaskDelay(pdMS_TO_TICKS(100)); // Small delay between servos
+            }
+            
+            vTaskDelay(pdMS_TO_TICKS(1000)); // Wait between position changes
+        }
+        
+        ESP_LOGI(TAG, "Movement test complete");
+        
+        // Start interactive control
+        printf("\n\n===== Dynamixel Servo Control =====\n");
+        printf("Use the following keys to control all servos:\n");
+        printf("W: Move all servos slightly up/left (-50)\n");
+        printf("S: Move all servos slightly down/right (+50)\n");
+        printf("C: Center all servos (position 2048)\n");
+        printf("1-6: Select a servo (0 for all servos)\n");
+        printf("Q: Quit\n");
+        
+        int selected_servo = 0; // 0 means all servos
+        
+        // Main control loop for interactive control
+        while (1) {
+            int ch = read_key_from_uart();
+            if (ch != -1) {
+                if (ch == 'q' || ch == 'Q') {
+                    printf("Returning all servos to center and exiting\n");
+                    for (int i = 0; i < found_count; i++) {
+                        set_servo_position(found_ids[i], CENTER_POSITION);
+                        vTaskDelay(pdMS_TO_TICKS(100));
+                    }
+                    break;
+                } else if (ch == 'w' || ch == 'W') {
+                    uint32_t new_pos = CENTER_POSITION - 50;
+                    printf("Moving %s to position: %" PRIu32 "\n", 
+                           selected_servo == 0 ? "all servos" : "selected servo", 
+                           new_pos);
+                    
+                    if (selected_servo == 0) {
+                        // Move all servos
+                        for (int i = 0; i < found_count; i++) {
+                            set_servo_position(found_ids[i], new_pos);
+                            vTaskDelay(pdMS_TO_TICKS(100));
                         }
-                        
-                        // Update servo position if needed
-                        if (position_changed) {
-                            if (set_position(current_position)) {
-                                ESP_LOGI(TAG, "Set position to: %" PRIu32, current_position);
-                                
-                                // Wait for movement to complete
-                                vTaskDelay(pdMS_TO_TICKS(500));
-                                
-                                // Verify position
-                                uint32_t read_pos = 0;
-                                if (read_position(&read_pos)) {
-                                    ESP_LOGI(TAG, "Position confirmed: %" PRIu32, read_pos);
-                                }
-                            } else {
-                                ESP_LOGE(TAG, "Failed to set position");
+                    } else {
+                        // Find the servo with matching ID
+                        for (int i = 0; i < found_count; i++) {
+                            if (found_ids[i] == selected_servo) {
+                                set_servo_position(found_ids[i], new_pos);
+                                break;
                             }
                         }
                     }
+                } else if (ch == 's' || ch == 'S') {
+                    uint32_t new_pos = CENTER_POSITION + 50;
+                    printf("Moving %s to position: %" PRIu32 "\n", 
+                           selected_servo == 0 ? "all servos" : "selected servo", 
+                           new_pos);
                     
-                    // Small delay to prevent CPU hogging
-                    vTaskDelay(pdMS_TO_TICKS(50));
+                    if (selected_servo == 0) {
+                        // Move all servos
+                        for (int i = 0; i < found_count; i++) {
+                            set_servo_position(found_ids[i], new_pos);
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                        }
+                    } else {
+                        // Find the servo with matching ID
+                        for (int i = 0; i < found_count; i++) {
+                            if (found_ids[i] == selected_servo) {
+                                set_servo_position(found_ids[i], new_pos);
+                                break;
+                            }
+                        }
+                    }
+                } else if (ch == 'c' || ch == 'C') {
+                    printf("Centering %s\n", selected_servo == 0 ? "all servos" : "selected servo");
+                    
+                    if (selected_servo == 0) {
+                        // Center all servos
+                        for (int i = 0; i < found_count; i++) {
+                            set_servo_position(found_ids[i], CENTER_POSITION);
+                            vTaskDelay(pdMS_TO_TICKS(100));
+                        }
+                    } else {
+                        // Find the servo with matching ID
+                        for (int i = 0; i < found_count; i++) {
+                            if (found_ids[i] == selected_servo) {
+                                set_servo_position(found_ids[i], CENTER_POSITION);
+                                break;
+                            }
+                        }
+                    }
+                } else if (ch >= '0' && ch <= '6') {
+                    selected_servo = ch - '0';
+                    if (selected_servo == 0) {
+                        printf("Selected all servos\n");
+                    } else {
+                        // Check if this servo was found
+                        bool servo_found = false;
+                        for (int i = 0; i < found_count; i++) {
+                            if (found_ids[i] == selected_servo) {
+                                servo_found = true;
+                                break;
+                            }
+                        }
+                        
+                        if (servo_found) {
+                            printf("Selected servo ID %d\n", selected_servo);
+                        } else {
+                            printf("Servo ID %d was not found during scan\n", selected_servo);
+                        }
+                    }
                 }
-            } else {
-                ESP_LOGE(TAG, "Failed to enable torque");
             }
-        } else {
-            ESP_LOGE(TAG, "Failed to set operating mode");
+            
+            // Small delay to prevent CPU hogging
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     } else {
-        ESP_LOGE(TAG, "Failed to ping servo after multiple attempts");
+        ESP_LOGE(TAG, "No servos found. Check connections and power.");
+        printf("\nNo Dynamixel servos found. Please check:\n");
+        printf("1. Servo power (usually 12V)\n");
+        printf("2. Data line connections\n");
+        printf("3. That servos are set to correct baudrate (%d)\n", BAUDRATE);
     }
     
-    // This task should never exit, but just in case
     vTaskDelete(NULL);
 }
 
@@ -765,10 +913,10 @@ void app_main(void)
     init_console();
     
     ESP_LOGI(TAG, "ESP32 Dynamixel Controller");
-    ESP_LOGI(TAG, "Simplified version for ID 1 only");
+    ESP_LOGI(TAG, "Multiple servo control version");
     ESP_LOGI(TAG, "TX Pin: %d, RX Pin: %d, DIR Pin: %d", DXL_TXD_PIN, DXL_RXD_PIN, DXL_DIR_PIN);
     
-    // Create task for Dynamixel control
-    xTaskCreate(dynamixel_task, "dynamixel_task", 4096, NULL, 5, NULL);
+    // Create task for Dynamixel control with increased stack size for multiple servos
+    xTaskCreate(dynamixel_task, "dynamixel_task", 8192, NULL, 5, NULL);
 }
 
