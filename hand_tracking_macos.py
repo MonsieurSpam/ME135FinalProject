@@ -20,8 +20,8 @@ import time
 import math
 import os
 
-# Set environment variable to bypass camera authorization issues on Mac
-os.environ['OPENCV_AVFOUNDATION_SKIP_AUTH'] = '1'
+# Set environment variable to enable camera authorization on Mac
+os.environ['OPENCV_AVFOUNDATION_SKIP_AUTH'] = '0'
 
 # Mediapipe Hand settings
 mp_hands = mp.solutions.hands
@@ -341,10 +341,30 @@ def main():
     print("Starting Hand Tracking 3D Control")
     print("Press 'q' or ESC to exit")
     
-    # Initialize the webcam
-    cap = cv2.VideoCapture(0)
+    # Initialize webcam with retry logic
+    max_retries = 3
+    for attempt in range(max_retries):
+        print(f"Attempting to connect to camera (attempt {attempt+1}/{max_retries})...")
+        cap = cv2.VideoCapture(1)  # Use camera index 1
+        
+        if not cap.isOpened():
+            print(f"Failed to open camera on attempt {attempt+1}")
+            if attempt < max_retries - 1:
+                print("Retrying in 2 seconds...")
+                time.sleep(2)
+            continue
+        
+        # Camera warm-up time
+        print("Camera connected! Warming up...")
+        for i in range(10):  # Discard the first few frames
+            ret, _ = cap.read()
+            time.sleep(0.1)
+        
+        print("Camera ready!")
+        break
+    
     if not cap.isOpened():
-        print("Error: Could not open webcam")
+        print("Error: Could not open webcam after multiple attempts")
         return
 
     # Set a smaller resolution for better performance

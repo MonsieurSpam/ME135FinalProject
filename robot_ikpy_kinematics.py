@@ -372,6 +372,23 @@ class RobotArmIKPy:
         
         return fig, ax
 
+    def invert_servo3_position(self, position, servo_index=2):
+        """
+        Inverts the position of Servo 3 (or specified servo) relative to its center.
+        
+        Args:
+            position: The original position value
+            servo_index: The index of the servo to invert (default is 2 for Servo 3)
+            
+        Returns:
+            The inverted position value
+        """
+        # Calculate the center position
+        center = (self.joint_dxl_limits[servo_index][0] + self.joint_dxl_limits[servo_index][1]) / 2
+        # Invert the position relative to center
+        inverted_position = int(center * 2 - position)
+        return inverted_position
+
 def main():
     parser = argparse.ArgumentParser(description='Inverse Kinematics for 6-axis robot arm using IKPy')
     parser.add_argument('--mode', choices=['fk', 'ik', 'test'], default='ik',
