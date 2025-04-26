@@ -138,37 +138,17 @@ static void dxl_control_task(void *pvParameters)
         }
         
         ESP_LOGI(TAG, "All servos moved to center position");
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        
-        // Small movement test
-        const uint32_t positions[] = {
-            DXL_CENTER_POSITION - 50,
-            DXL_CENTER_POSITION + 50,
-            DXL_CENTER_POSITION
-        };
-        
-        ESP_LOGI(TAG, "Testing small movements");
-        for (int pos_idx = 0; pos_idx < 3; pos_idx++) {
-            ESP_LOGI(TAG, "Movement step %d: Position %d", pos_idx + 1, (int)positions[pos_idx]);
-            
-            for (int i = 0; i < found_count; i++) {
-                dxl_set_position(servo_ids[i], positions[pos_idx]);
-                vTaskDelay(pdMS_TO_TICKS(100));
-            }
-            
-            vTaskDelay(pdMS_TO_TICKS(1000));
-        }
-        
-        ESP_LOGI(TAG, "Movement test complete");
+        vTaskDelay(pdMS_TO_TICKS(500)); // Small delay for stability
         
         // Start interactive control
         printf("\n\n===== Dynamixel Servo Control =====\n");
         printf("Use the following keys to control servos:\n");
-        printf("W: Move all servos slightly up/left (-50)\n");
-        printf("S: Move all servos slightly down/right (+50)\n");
+        printf("W: Increment position by 50 steps\n");
+        printf("S: Decrement position by 50 steps\n");
         printf("C: Center all servos\n");
         printf("1-%d: Select a servo (0 for all servos)\n", MAX_SERVOS);
         printf("Q: Quit\n\n");
+        printf("Waiting for commands...\n");
         
         int selected_servo = 0; // 0 means all servos
         
@@ -184,43 +164,83 @@ static void dxl_control_task(void *pvParameters)
                     }
                     break;
                 } else if (ch == 'w' || ch == 'W') {
-                    uint32_t new_pos = DXL_CENTER_POSITION - 50;
-                    printf("Moving %s to position: %" PRIu32 "\n",
-                           selected_servo == 0 ? "all servos" : "selected servo",
-                           new_pos);
+                    // Get current position and increment it by a fixed amount
+                    printf("Moving %s +50 steps\n", selected_servo == 0 ? "all servos" : "selected servo");
                     
                     if (selected_servo == 0) {
                         // Move all servos
                         for (int i = 0; i < found_count; i++) {
-                            dxl_set_position(servo_ids[i], new_pos);
-                            vTaskDelay(pdMS_TO_TICKS(100));
+                            uint32_t current_pos = 0;
+                            if (dxl_read_position(servo_ids[i], &current_pos)) {
+                                uint32_t new_pos = current_pos + 50;
+                                // Prevent overflow
+                                if (new_pos > DXL_MAX_POSITION) {
+                                    new_pos = DXL_MAX_POSITION;
+                                }
+                                printf("Servo ID %d: Position %d -> %d\n", 
+                                      servo_ids[i], (int)current_pos, (int)new_pos);
+                                dxl_set_position(servo_ids[i], new_pos);
+                                vTaskDelay(pdMS_TO_TICKS(100));
+                            }
                         }
                     } else {
                         // Find the selected servo
                         for (int i = 0; i < found_count; i++) {
                             if (servo_ids[i] == selected_servo) {
-                                dxl_set_position(servo_ids[i], new_pos);
+                                uint32_t current_pos = 0;
+                                if (dxl_read_position(servo_ids[i], &current_pos)) {
+                                    uint32_t new_pos = current_pos + 50;
+                                    // Prevent overflow
+                                    if (new_pos > DXL_MAX_POSITION) {
+                                        new_pos = DXL_MAX_POSITION;
+                                    }
+                                    printf("Servo ID %d: Position %d -> %d\n", 
+                                          servo_ids[i], (int)current_pos, (int)new_pos);
+                                    dxl_set_position(servo_ids[i], new_pos);
+                                }
                                 break;
                             }
                         }
                     }
                 } else if (ch == 's' || ch == 'S') {
-                    uint32_t new_pos = DXL_CENTER_POSITION + 50;
-                    printf("Moving %s to position: %" PRIu32 "\n",
-                           selected_servo == 0 ? "all servos" : "selected servo",
-                           new_pos);
+                    // Get current position and decrement it by a fixed amount
+                    printf("Moving %s -50 steps\n", selected_servo == 0 ? "all servos" : "selected servo");
                     
                     if (selected_servo == 0) {
                         // Move all servos
                         for (int i = 0; i < found_count; i++) {
-                            dxl_set_position(servo_ids[i], new_pos);
-                            vTaskDelay(pdMS_TO_TICKS(100));
+                            uint32_t current_pos = 0;
+                            if (dxl_read_position(servo_ids[i], &current_pos)) {
+                                uint32_t new_pos;
+                                // Prevent underflow
+                                if (current_pos < 50) {
+                                    new_pos = DXL_MIN_POSITION;
+                                } else {
+                                    new_pos = current_pos - 50;
+                                }
+                                printf("Servo ID %d: Position %d -> %d\n", 
+                                      servo_ids[i], (int)current_pos, (int)new_pos);
+                                dxl_set_position(servo_ids[i], new_pos);
+                                vTaskDelay(pdMS_TO_TICKS(100));
+                            }
                         }
                     } else {
                         // Find the selected servo
                         for (int i = 0; i < found_count; i++) {
                             if (servo_ids[i] == selected_servo) {
-                                dxl_set_position(servo_ids[i], new_pos);
+                                uint32_t current_pos = 0;
+                                if (dxl_read_position(servo_ids[i], &current_pos)) {
+                                    uint32_t new_pos;
+                                    // Prevent underflow
+                                    if (current_pos < 50) {
+                                        new_pos = DXL_MIN_POSITION;
+                                    } else {
+                                        new_pos = current_pos - 50;
+                                    }
+                                    printf("Servo ID %d: Position %d -> %d\n", 
+                                          servo_ids[i], (int)current_pos, (int)new_pos);
+                                    dxl_set_position(servo_ids[i], new_pos);
+                                }
                                 break;
                             }
                         }
