@@ -170,19 +170,16 @@ static void dxl_control_task(void *pvParameters)
         }
         
         ESP_LOGI(TAG, "All servos moved to center position");
-        vTaskDelay(pdMS_TO_TICKS(500)); // Small delay for stability
+        vTaskDelay(pdMS_TO_TICKS(300)); // Reduced delay for stability
         
         // Flush stdin to clear any buffered input
         fflush(stdin);
-        
-        // Give some time for the system to stabilize before accepting input
-        vTaskDelay(pdMS_TO_TICKS(1000));
         
         // Clear the screen with ANSI escape sequence
         printf("\033[2J\033[H");  // Clear screen and position cursor at top
         printf("\n\n=== SYSTEM READY ===\n");
         printf("Please wait a moment before entering commands...\n");
-        vTaskDelay(pdMS_TO_TICKS(2000));  // Wait 2 seconds
+        vTaskDelay(pdMS_TO_TICKS(500));  // Reduced waiting time
         
         // Start interactive control
         print_main_menu(MAX_SERVOS);
@@ -191,19 +188,14 @@ static void dxl_control_task(void *pvParameters)
         
         // Main interactive control loop
         while (1) {
-            // Clear any pending inputs
-            while (read_key_from_uart() != -1) {
-                vTaskDelay(pdMS_TO_TICKS(10));
-            }
-            
-            // Wait for actual user input
+            // Check for user input with minimal delay
             int ch = read_key_from_uart();
             if (ch != -1) {
                 if (ch == 'q' || ch == 'Q') {
                     printf("Returning all servos to center and exiting\n");
                     for (int i = 0; i < found_count; i++) {
                         dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
-                        vTaskDelay(pdMS_TO_TICKS(100));
+                        vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
                     }
                     break;
                 } else if (ch == 'b' || ch == 'B') {
@@ -228,7 +220,7 @@ static void dxl_control_task(void *pvParameters)
                                 printf("Servo ID %d: Position %d -> %d\n", 
                                       servo_ids[i], (int)current_pos, (int)new_pos);
                                 dxl_set_position(servo_ids[i], new_pos);
-                                vTaskDelay(pdMS_TO_TICKS(100));
+                                vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
                             }
                         }
                     } else {
@@ -269,7 +261,7 @@ static void dxl_control_task(void *pvParameters)
                                 printf("Servo ID %d: Position %d -> %d\n", 
                                       servo_ids[i], (int)current_pos, (int)new_pos);
                                 dxl_set_position(servo_ids[i], new_pos);
-                                vTaskDelay(pdMS_TO_TICKS(100));
+                                vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
                             }
                         }
                     } else {
@@ -300,7 +292,7 @@ static void dxl_control_task(void *pvParameters)
                         // Center all servos
                         for (int i = 0; i < found_count; i++) {
                             dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
-                            vTaskDelay(pdMS_TO_TICKS(100));
+                            vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
                         }
                     } else {
                         // Find the selected servo
@@ -335,8 +327,8 @@ static void dxl_control_task(void *pvParameters)
                 }
             }
             
-            // Small delay to prevent CPU hogging
-            vTaskDelay(pdMS_TO_TICKS(50));
+            // Small delay to prevent CPU hogging - reduced for responsiveness
+            vTaskDelay(pdMS_TO_TICKS(5)); // Reduced from 50ms to 5ms
         }
     } else {
         ESP_LOGE(TAG, "No servos found!");

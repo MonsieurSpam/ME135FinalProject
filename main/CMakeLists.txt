@@ -4,6 +4,5 @@ set(DYNAMIXEL_SDK_SRCS
 )
 
 # Register component
-idf_component_register(SRCS "dynamixel.c"
+idf_component_register(SRCS "uart_echo_example_main.c" "dynamixel.c"
                     INCLUDE_DIRS ".")
-
