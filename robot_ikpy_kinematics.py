@@ -30,12 +30,12 @@ END_EFFECTOR_LENGTH = 0.05  # Joint 6 to end-effector - 5 cm
 
 # Custom joint limits for Dynamixel servo motors
 # Format: [min_position, max_position, min_angle_degrees, max_angle_degrees]
-JOINT_1_LIMITS = [1027, 2975, 0, 180]  # Joint 1 (base)
-JOINT_2_LIMITS = [1582, 2806, 0, 180]  # Joint 2 (shoulder)
-JOINT_3_LIMITS = [1241, 3000, 0, 180]  # Joint 3 (elbow)
-JOINT_4_LIMITS = [1523, 2476, 0, 90]   # Joint 4 (wrist rotation)
-JOINT_5_LIMITS = [1830, 2200, 0, 45]   # Joint 5 (wrist pitch)
-JOINT_6_LIMITS = [2000, 2634, 90, 0]   # Joint 6 (gripper), reversed range
+JOINT_1_LIMITS = [1027, 2975, 0, 180]  # Joint 1 (base) - Max: 2975 (counter clockwise) 180 degrees, Min: 1027 / 0 degrees (clockwise)
+JOINT_2_LIMITS = [1582, 2806, 0, 180]  # Joint 2 (shoulder) - Max: 1582 0 degrees, 2806 180 degrees
+JOINT_3_LIMITS = [1241, 3000, 0, 180]  # Joint 3 (elbow) - Max: 1241 (straight) 0 degrees, Min: 3000 180 degrees
+JOINT_4_LIMITS = [1523, 2476, 0, 90]   # Joint 4 (wrist rotation) - Max: 1523 (backward) 0 degrees, Min: 2476 (forward) 90 degrees
+JOINT_5_LIMITS = [1830, 2200, 0, 45]   # Joint 5 (wrist pitch) - Max: 2200 (clockwise) 45 degrees, Min: 1830 (counter clockwise) 0 degrees
+JOINT_6_LIMITS = [2000, 2634, 90, 0]   # Joint 6 (gripper) - Max: 2634 (open) 0 degrees, Min: 2000 (closed) 90 degrees
 
 class RobotArmIKPy:
     def __init__(self):
