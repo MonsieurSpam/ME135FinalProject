@@ -1,8 +1,0 @@
-{
-    "C_Cpp.intelliSenseEngine": "default",
-    "idf.espIdfPath": "/Users/alexlu/esp/v5.4.1/esp-idf",
-    "idf.toolsPath": "/Users/alexlu/.espressif",
-    "idf.pythonInstallPath": "/Users/user/.pyenv/shims/python",
-    "idf.port": "/dev/tty.usbserial-59100209741",
-    "idf.flashType": "UART"
-}
