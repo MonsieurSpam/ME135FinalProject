@@ -9,6 +9,7 @@
 #include <inttypes.h>
 #include <sys/time.h>
 #include <sys/select.h>
+#include <ctype.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
@@ -37,6 +38,8 @@
 #define MAX_SERVOS     6
 
 // Function to read character input from console in non-blocking mode
+// Removing this function as we're focusing only on serial commands
+/*
 static int read_key_from_uart(void)
 {
     // Check if input is available
@@ -74,6 +77,7 @@ static int read_key_from_uart(void)
     
     return -1; // No data available
 }
+*/
 
 // Initialize console for input
 static void init_console(void)
@@ -115,17 +119,149 @@ static void init_console(void)
 }
 
 // Print the main menu
-static void print_main_menu(int max_servos)
+static void print_main_menu()
 {
     printf("\n\n===== Dynamixel Servo Control =====\n");
-    printf("Use the following keys to control servos:\n");
-    printf("W: Increment position by 50 steps\n");
-    printf("S: Decrement position by 50 steps\n");
-    printf("C: Center all servos\n");
-    printf("1-%d: Select a servo (0 for all servos)\n", max_servos);
-    printf("B: Back to main menu\n");
-    printf("Q: Quit\n\n");
-    printf("Waiting for commands...\n");
+    printf("Available commands:\n");
+    printf("SxPyyy - Set servo x to position yyy (e.g., S1P2048)\n");
+    printf("M2048,2048,2048,2048,2048,2048 - Move all servos to specified positions\n");
+    printf("C - Center all servos\n");
+    printf("R - Read all servo positions\n");
+    printf("\nWaiting for commands...\n");
+}
+
+// Process a command to set a single servo position
+static void process_servo_command(const char* cmd) {
+    int servo_id = 0;
+    int position = 0;
+    
+    // Format: SxPyyy where x is servo ID (1-6) and yyy is position
+    if (sscanf(cmd, "S%dP%d", &servo_id, &position) == 2) {
+        if (servo_id >= 1 && servo_id <= 6 && position >= 0 && position <= 4095) {
+            // Set the servo position
+            if (dxl_set_position(servo_id, position)) {
+                printf("OK\n");
+            } else {
+                printf("ERROR: Failed to set servo position\n");
+            }
+        } else {
+            printf("ERROR: Invalid servo ID or position value\n");
+        }
+    } else {
+        printf("ERROR: Invalid command format\n");
+    }
+}
+
+// Process a command to set all servo positions at once
+static void process_move_all_command(const char* cmd) {
+    int positions[6];
+    char temp[64];
+    strncpy(temp, cmd + 1, sizeof(temp) - 1); // Skip the 'M' prefix
+    
+    // Format: M2048,2048,2048,2048,2048,2048
+    char* token = strtok(temp, ",");
+    int count = 0;
+    
+    while (token != NULL && count < 6) {
+        positions[count++] = atoi(token);
+        token = strtok(NULL, ",");
+    }
+    
+    if (count == 6) {
+        bool success = true;
+        for (int i = 0; i < 6; i++) {
+            if (!dxl_set_position(i + 1, positions[i])) {
+                success = false;
+                break;
+            }
+        }
+        
+        if (success) {
+            printf("OK\n");
+        } else {
+            printf("ERROR: Failed to set all servo positions\n");
+        }
+    } else {
+        printf("ERROR: Expected 6 position values\n");
+    }
+}
+
+// Process a command to center all servos
+static void process_center_command(void) {
+    bool success = true;
+    
+    // Set all servos to center position (2048)
+    for (int i = 1; i <= 6; i++) {
+        if (!dxl_set_position(i, 2048)) {
+            success = false;
+            break;
+        }
+    }
+    
+    if (success) {
+        printf("OK\n");
+    } else {
+        printf("ERROR: Failed to center all servos\n");
+    }
+}
+
+// Process a command to read all servo positions
+static void process_read_command(void) {
+    printf("Positions: ");
+    
+    for (int i = 1; i <= 6; i++) {
+        uint32_t position = 2048; // Default/fallback value
+        
+        // Try to read the current position
+        if (dxl_read_position(i, &position)) {
+            printf("%d", (int)position);
+        } else {
+            printf("2048"); // Use default if read fails
+        }
+        
+        // Add comma except for the last item
+        if (i < 6) {
+            printf(",");
+        }
+    }
+    
+    printf("\nOK\n");
+}
+
+// Process incoming serial commands
+static void process_command(const char* cmd) {
+    // Trim any whitespace
+    while (isspace((unsigned char)*cmd)) {
+        cmd++;
+    }
+    
+    // Ignore empty commands
+    if (strlen(cmd) == 0) {
+        return;
+    }
+    
+    // Process command based on first character
+    switch (cmd[0]) {
+        case 'S': // Set a single servo: S1P2048
+            process_servo_command(cmd);
+            break;
+            
+        case 'M': // Move all servos: M2048,2048,2048,2048,2048,2048
+            process_move_all_command(cmd);
+            break;
+            
+        case 'C': // Center all servos
+            process_center_command();
+            break;
+            
+        case 'R': // Read all servo positions
+            process_read_command();
+            break;
+            
+        default:
+            printf("ERROR: Unknown command '%c'\n", cmd[0]);
+            break;
+    }
 }
 
 // Dynamixel control task
@@ -181,154 +317,38 @@ static void dxl_control_task(void *pvParameters)
         printf("Please wait a moment before entering commands...\n");
         vTaskDelay(pdMS_TO_TICKS(500));  // Reduced waiting time
         
-        // Start interactive control
-        print_main_menu(MAX_SERVOS);
+        // Start command processing
+        print_main_menu();
         
-        int selected_servo = 0; // 0 means all servos
+        // Buffer for storing incoming commands
+        char cmd_buffer[128];
+        int cmd_pos = 0;
         
-        // Main interactive control loop
+        // Main command processing loop
         while (1) {
-            // Check for user input with minimal delay
-            int ch = read_key_from_uart();
-            if (ch != -1) {
-                if (ch == 'q' || ch == 'Q') {
-                    printf("Returning all servos to center and exiting\n");
-                    for (int i = 0; i < found_count; i++) {
-                        dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
-                        vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
+            // Check for serial commands
+            int ch = fgetc(stdin);
+            if (ch != EOF) {
+                // Echo the character for better UX
+                printf("%c", ch);
+                
+                if (ch == '\n' || ch == '\r') {
+                    // End of command, process it
+                    if (cmd_pos > 0) {
+                        cmd_buffer[cmd_pos] = '\0';
+                        printf("\nProcessing command: %s\n", cmd_buffer);
+                        process_command(cmd_buffer);
+                        cmd_pos = 0;
+                        printf("\nEnter command: ");
                     }
-                    break;
-                } else if (ch == 'b' || ch == 'B') {
-                    // Return to main menu
-                    selected_servo = 0; // Reset to all servos
-                    printf("Returning to main menu...\n");
-                    print_main_menu(MAX_SERVOS);
-                } else if (ch == 'w' || ch == 'W') {
-                    // Get current position and increment it by a fixed amount
-                    printf("Moving %s +50 steps\n", selected_servo == 0 ? "all servos" : "selected servo");
-                    
-                    if (selected_servo == 0) {
-                        // Move all servos
-                        for (int i = 0; i < found_count; i++) {
-                            uint32_t current_pos = 0;
-                            if (dxl_read_position(servo_ids[i], &current_pos)) {
-                                uint32_t new_pos = current_pos + 50;
-                                // Prevent overflow
-                                if (new_pos > DXL_MAX_POSITION) {
-                                    new_pos = DXL_MAX_POSITION;
-                                }
-                                printf("Servo ID %d: Position %d -> %d\n", 
-                                      servo_ids[i], (int)current_pos, (int)new_pos);
-                                dxl_set_position(servo_ids[i], new_pos);
-                                vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
-                            }
-                        }
-                    } else {
-                        // Find the selected servo
-                        for (int i = 0; i < found_count; i++) {
-                            if (servo_ids[i] == selected_servo) {
-                                uint32_t current_pos = 0;
-                                if (dxl_read_position(servo_ids[i], &current_pos)) {
-                                    uint32_t new_pos = current_pos + 50;
-                                    // Prevent overflow
-                                    if (new_pos > DXL_MAX_POSITION) {
-                                        new_pos = DXL_MAX_POSITION;
-                                    }
-                                    printf("Servo ID %d: Position %d -> %d\n", 
-                                          servo_ids[i], (int)current_pos, (int)new_pos);
-                                    dxl_set_position(servo_ids[i], new_pos);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                } else if (ch == 's' || ch == 'S') {
-                    // Get current position and decrement it by a fixed amount
-                    printf("Moving %s -50 steps\n", selected_servo == 0 ? "all servos" : "selected servo");
-                    
-                    if (selected_servo == 0) {
-                        // Move all servos
-                        for (int i = 0; i < found_count; i++) {
-                            uint32_t current_pos = 0;
-                            if (dxl_read_position(servo_ids[i], &current_pos)) {
-                                uint32_t new_pos;
-                                // Prevent underflow
-                                if (current_pos < 50) {
-                                    new_pos = DXL_MIN_POSITION;
-                                } else {
-                                    new_pos = current_pos - 50;
-                                }
-                                printf("Servo ID %d: Position %d -> %d\n", 
-                                      servo_ids[i], (int)current_pos, (int)new_pos);
-                                dxl_set_position(servo_ids[i], new_pos);
-                                vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
-                            }
-                        }
-                    } else {
-                        // Find the selected servo
-                        for (int i = 0; i < found_count; i++) {
-                            if (servo_ids[i] == selected_servo) {
-                                uint32_t current_pos = 0;
-                                if (dxl_read_position(servo_ids[i], &current_pos)) {
-                                    uint32_t new_pos;
-                                    // Prevent underflow
-                                    if (current_pos < 50) {
-                                        new_pos = DXL_MIN_POSITION;
-                                    } else {
-                                        new_pos = current_pos - 50;
-                                    }
-                                    printf("Servo ID %d: Position %d -> %d\n", 
-                                          servo_ids[i], (int)current_pos, (int)new_pos);
-                                    dxl_set_position(servo_ids[i], new_pos);
-                                }
-                                break;
-                            }
-                        }
-                    }
-                } else if (ch == 'c' || ch == 'C') {
-                    printf("Centering %s\n", selected_servo == 0 ? "all servos" : "selected servo");
-                    
-                    if (selected_servo == 0) {
-                        // Center all servos
-                        for (int i = 0; i < found_count; i++) {
-                            dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
-                            vTaskDelay(pdMS_TO_TICKS(20)); // Reduced delay
-                        }
-                    } else {
-                        // Find the selected servo
-                        for (int i = 0; i < found_count; i++) {
-                            if (servo_ids[i] == selected_servo) {
-                                dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
-                                break;
-                            }
-                        }
-                    }
-                } else if (ch >= '0' && ch <= '0' + MAX_SERVOS) {
-                    selected_servo = ch - '0';
-                    if (selected_servo == 0) {
-                        printf("Selected all servos\n");
-                    } else {
-                        // Check if this servo was found
-                        bool servo_found = false;
-                        for (int i = 0; i < found_count; i++) {
-                            if (servo_ids[i] == selected_servo) {
-                                servo_found = true;
-                                break;
-                            }
-                        }
-                        
-                        if (servo_found) {
-                            printf("Selected servo ID %d\n", selected_servo);
-                        } else {
-                            printf("Servo ID %d was not found during scan\n", selected_servo);
-                            selected_servo = 0; // Reset to all servos
-                        }
-                    }
+                } else if (cmd_pos < sizeof(cmd_buffer) - 1) {
+                    // Add character to command buffer
+                    cmd_buffer[cmd_pos++] = (char)ch;
                 }
             }
             
-            // Small delay to prevent CPU hogging - reduced for responsiveness
-            vTaskDelay(pdMS_TO_TICKS(5)); // Reduced from 50ms to 5ms
+            // Delay to prevent CPU hogging - increased for monitor mode
+            vTaskDelay(pdMS_TO_TICKS(50));
         }
     } else {
         ESP_LOGE(TAG, "No servos found!");

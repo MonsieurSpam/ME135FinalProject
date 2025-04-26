@@ -390,6 +390,13 @@ def main():
                         help='Visualize the robot arm')
     parser.add_argument('--limits', action='store_true',
                         help='Show the joint limits')
+    # Add ESP32 communication options
+    parser.add_argument('--send-to-esp32', action='store_true',
+                        help='Send the calculated positions to the ESP32')
+    parser.add_argument('--port', type=str,
+                        help='Serial port for ESP32 (e.g., /dev/ttyUSB0, COM3)')
+    parser.add_argument('--baudrate', type=int, default=115200,
+                        help='Baud rate for ESP32 communication (default: 115200)')
     
     args = parser.parse_args()
     
@@ -461,6 +468,29 @@ def main():
                 except Exception as e:
                     print(f"Error in visualization: {e}")
             
+            # Send to ESP32 if requested
+            if args.send_to_esp32:
+                try:
+                    from esp32_robot_interface import ESP32RobotInterface
+                    
+                    # Create the interface
+                    interface = ESP32RobotInterface(port=args.port, baudrate=args.baudrate)
+                    
+                    # Connect to ESP32
+                    if interface.connect():
+                        # Set the servo positions
+                        success = interface.set_all_servo_positions(positions)
+                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
+                        
+                        # Disconnect from ESP32
+                        interface.disconnect()
+                    else:
+                        print("Failed to connect to ESP32.")
+                except ImportError:
+                    print("Error: esp32_robot_interface.py not found. Make sure it's in the same directory.")
+                except Exception as e:
+                    print(f"Error communicating with ESP32: {e}")
+            
             return
         
         # Forward Kinematics mode
@@ -504,6 +534,29 @@ def main():
             print("\nEnd-effector orientation (rotation matrix):")
             for i in range(3):
                 print(f"[{rotation[i,0]:.4f}, {rotation[i,1]:.4f}, {rotation[i,2]:.4f}]")
+            
+            # Send to ESP32 if requested
+            if args.send_to_esp32:
+                try:
+                    from esp32_robot_interface import ESP32RobotInterface
+                    
+                    # Create the interface
+                    interface = ESP32RobotInterface(port=args.port, baudrate=args.baudrate)
+                    
+                    # Connect to ESP32
+                    if interface.connect():
+                        # Set the servo positions
+                        success = interface.set_all_servo_positions(dynamixel_positions)
+                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
+                        
+                        # Disconnect from ESP32
+                        interface.disconnect()
+                    else:
+                        print("Failed to connect to ESP32.")
+                except ImportError:
+                    print("Error: esp32_robot_interface.py not found. Make sure it's in the same directory.")
+                except Exception as e:
+                    print(f"Error communicating with ESP32: {e}")
         
         # Inverse Kinematics mode
         else:
@@ -550,6 +603,29 @@ def main():
                 print(f"\nError calculating actual position: {e}")
                 
             print(f"Calculation time: {(end_time - start_time)*1000:.2f} ms")
+            
+            # Send to ESP32 if requested
+            if args.send_to_esp32:
+                try:
+                    from esp32_robot_interface import ESP32RobotInterface
+                    
+                    # Create the interface
+                    interface = ESP32RobotInterface(port=args.port, baudrate=args.baudrate)
+                    
+                    # Connect to ESP32
+                    if interface.connect():
+                        # Set the servo positions
+                        success = interface.set_all_servo_positions(dynamixel_positions)
+                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
+                        
+                        # Disconnect from ESP32
+                        interface.disconnect()
+                    else:
+                        print("Failed to connect to ESP32.")
+                except ImportError:
+                    print("Error: esp32_robot_interface.py not found. Make sure it's in the same directory.")
+                except Exception as e:
+                    print(f"Error communicating with ESP32: {e}")
         
         # Visualize if requested
         if args.visualize:
