@@ -51,7 +51,25 @@ static int read_key_from_uart(void)
     
     int ret = select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
     if (ret > 0) {
-        return fgetc(stdin);
+        int ch = fgetc(stdin);
+        
+        // Filter out control characters and non-printable ASCII
+        if (ch < 0 || (ch < 32 && ch != '\n' && ch != '\r')) {
+            return -1;
+        }
+        
+        // Only accept valid command characters
+        if (ch == 'w' || ch == 'W' || 
+            ch == 's' || ch == 'S' || 
+            ch == 'c' || ch == 'C' || 
+            ch == 'b' || ch == 'B' || 
+            ch == 'q' || ch == 'Q' || 
+            (ch >= '0' && ch <= '0' + MAX_SERVOS)) {
+            return ch;
+        }
+        
+        // Ignore other characters
+        return -1;
     }
     
     return -1; // No data available
@@ -94,6 +112,20 @@ static void init_console(void)
     linenoiseSetCompletionCallback(NULL);
     linenoiseSetHintsCallback(NULL);
     linenoiseHistorySetMaxLen(100);
+}
+
+// Print the main menu
+static void print_main_menu(int max_servos)
+{
+    printf("\n\n===== Dynamixel Servo Control =====\n");
+    printf("Use the following keys to control servos:\n");
+    printf("W: Increment position by 50 steps\n");
+    printf("S: Decrement position by 50 steps\n");
+    printf("C: Center all servos\n");
+    printf("1-%d: Select a servo (0 for all servos)\n", max_servos);
+    printf("B: Back to main menu\n");
+    printf("Q: Quit\n\n");
+    printf("Waiting for commands...\n");
 }
 
 // Dynamixel control task
@@ -140,20 +172,31 @@ static void dxl_control_task(void *pvParameters)
         ESP_LOGI(TAG, "All servos moved to center position");
         vTaskDelay(pdMS_TO_TICKS(500)); // Small delay for stability
         
+        // Flush stdin to clear any buffered input
+        fflush(stdin);
+        
+        // Give some time for the system to stabilize before accepting input
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        
+        // Clear the screen with ANSI escape sequence
+        printf("\033[2J\033[H");  // Clear screen and position cursor at top
+        printf("\n\n=== SYSTEM READY ===\n");
+        printf("Please wait a moment before entering commands...\n");
+        vTaskDelay(pdMS_TO_TICKS(2000));  // Wait 2 seconds
+        
         // Start interactive control
-        printf("\n\n===== Dynamixel Servo Control =====\n");
-        printf("Use the following keys to control servos:\n");
-        printf("W: Increment position by 50 steps\n");
-        printf("S: Decrement position by 50 steps\n");
-        printf("C: Center all servos\n");
-        printf("1-%d: Select a servo (0 for all servos)\n", MAX_SERVOS);
-        printf("Q: Quit\n\n");
-        printf("Waiting for commands...\n");
+        print_main_menu(MAX_SERVOS);
         
         int selected_servo = 0; // 0 means all servos
         
         // Main interactive control loop
         while (1) {
+            // Clear any pending inputs
+            while (read_key_from_uart() != -1) {
+                vTaskDelay(pdMS_TO_TICKS(10));
+            }
+            
+            // Wait for actual user input
             int ch = read_key_from_uart();
             if (ch != -1) {
                 if (ch == 'q' || ch == 'Q') {
@@ -163,6 +206,11 @@ static void dxl_control_task(void *pvParameters)
                         vTaskDelay(pdMS_TO_TICKS(100));
                     }
                     break;
+                } else if (ch == 'b' || ch == 'B') {
+                    // Return to main menu
+                    selected_servo = 0; // Reset to all servos
+                    printf("Returning to main menu...\n");
+                    print_main_menu(MAX_SERVOS);
                 } else if (ch == 'w' || ch == 'W') {
                     // Get current position and increment it by a fixed amount
                     printf("Moving %s +50 steps\n", selected_servo == 0 ? "all servos" : "selected servo");
