@@ -2,3 +2,5 @@ DynamixelSDK/
 main/build/
 build/
 me135env/
+__pycache__/
+.vscode
