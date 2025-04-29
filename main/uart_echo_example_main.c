@@ -10,6 +10,7 @@
 #include <sys/time.h>
 #include <sys/select.h>
 #include <ctype.h>
+#include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "esp_system.h"
@@ -22,6 +23,9 @@
 #include "driver/uart_vfs.h"
 #include "linenoise/linenoise.h"
 #include "dynamixel.h"
+#include "freertos/queue.h"
+#include "state_machine.h"
+#include "motor_parameters.h"
 
 #define TAG "DXL_EXAMPLE"
 
@@ -35,49 +39,22 @@
 #define DXL_BAUDRATE   1000000
 
 // Maximum number of servos to control
-#define MAX_SERVOS     6
+#define MAX_SERVOS     4
 
-// Function to read character input from console in non-blocking mode
-// Removing this function as we're focusing only on serial commands
-/*
-static int read_key_from_uart(void)
-{
-    // Check if input is available
-    fd_set rfds;
-    struct timeval tv = {
-        .tv_sec = 0,
-        .tv_usec = 0,
-    };
-    
-    FD_ZERO(&rfds);
-    FD_SET(fileno(stdin), &rfds);
-    
-    int ret = select(fileno(stdin) + 1, &rfds, NULL, NULL, &tv);
-    if (ret > 0) {
-        int ch = fgetc(stdin);
-        
-        // Filter out control characters and non-printable ASCII
-        if (ch < 0 || (ch < 32 && ch != '\n' && ch != '\r')) {
-            return -1;
-        }
-        
-        // Only accept valid command characters
-        if (ch == 'w' || ch == 'W' || 
-            ch == 's' || ch == 'S' || 
-            ch == 'c' || ch == 'C' || 
-            ch == 'b' || ch == 'B' || 
-            ch == 'q' || ch == 'Q' || 
-            (ch >= '0' && ch <= '0' + MAX_SERVOS)) {
-            return ch;
-        }
-        
-        // Ignore other characters
-        return -1;
-    }
-    
-    return -1; // No data available
-}
-*/
+// Add after other defines
+#define POSITION_CONTROL_STACK_SIZE 4096
+#define POSITION_CONTROL_PRIORITY 5
+#define POSITION_CONTROL_PERIOD_MS 20
+
+// Add these constants near the top with other constants
+#define DEMO_POSITION_DELAY_MS 2000  // Time to hold each position
+
+// Global variables for servo control
+static uint8_t servo_ids[MAX_SERVOS] = {0};
+static int found_count = 0;
+static pid_controller_t pid_controllers[MAX_SERVOS];
+static QueueHandle_t position_command_queue;
+static dxl_servo_control_t servo_controls[MAX_SERVOS];
 
 // Initialize console for input
 static void init_console(void)
@@ -127,10 +104,12 @@ static void print_main_menu()
     printf("M2048,2048,2048,2048,2048,2048 - Move all servos to specified positions\n");
     printf("C - Center all servos\n");
     printf("R - Read all servo positions\n");
+    printf("D - Run demo sequence\n");
+    printf("d - Run arm demo sequence\n");
     printf("\nWaiting for commands...\n");
 }
 
-// Process a command to set a single servo position
+// Process a command to set a single servo target position
 static void process_servo_command(const char* cmd) {
     int servo_id = 0;
     int position = 0;
@@ -138,11 +117,11 @@ static void process_servo_command(const char* cmd) {
     // Format: SxPyyy where x is servo ID (1-6) and yyy is position
     if (sscanf(cmd, "S%dP%d", &servo_id, &position) == 2) {
         if (servo_id >= 1 && servo_id <= 6 && position >= 0 && position <= 4095) {
-            // Set the servo position
-            if (dxl_set_position(servo_id, position)) {
+            // Set the target position using state machine
+            if (state_machine_set_target(servo_id, position)) {
                 printf("OK\n");
             } else {
-                printf("ERROR: Failed to set servo position\n");
+                printf("ERROR: Failed to set position\n");
             }
         } else {
             printf("ERROR: Invalid servo ID or position value\n");
@@ -152,7 +131,7 @@ static void process_servo_command(const char* cmd) {
     }
 }
 
-// Process a command to set all servo positions at once
+// Process a command to set all servo target positions at once
 static void process_move_all_command(const char* cmd) {
     int positions[6];
     char temp[64];
@@ -169,18 +148,12 @@ static void process_move_all_command(const char* cmd) {
     
     if (count == 6) {
         bool success = true;
-        for (int i = 0; i < 6; i++) {
-            if (!dxl_set_position(i + 1, positions[i])) {
+        for (int i = 0; i < found_count && i < MAX_SERVOS; i++) {
+            if (!state_machine_set_target(servo_ids[i], positions[i])) {
                 success = false;
-                break;
             }
         }
-        
-        if (success) {
-            printf("OK\n");
-        } else {
-            printf("ERROR: Failed to set all servo positions\n");
-        }
+        printf(success ? "OK\n" : "ERROR: Failed to set some positions\n");
     } else {
         printf("ERROR: Expected 6 position values\n");
     }
@@ -189,20 +162,14 @@ static void process_move_all_command(const char* cmd) {
 // Process a command to center all servos
 static void process_center_command(void) {
     bool success = true;
-    
-    // Set all servos to center position (2048)
-    for (int i = 1; i <= 6; i++) {
-        if (!dxl_set_position(i, 2048)) {
+    for (int i = 0; i < found_count && i < MAX_SERVOS; i++) {
+        uint8_t id = servo_ids[i];
+        int32_t position = (id == 1) ? 2048 : 2000; // Center position
+        if (!state_machine_set_target(id, position)) {
             success = false;
-            break;
         }
     }
-    
-    if (success) {
-        printf("OK\n");
-    } else {
-        printf("ERROR: Failed to center all servos\n");
-    }
+    printf(success ? "OK\n" : "ERROR: Failed to center some servos\n");
 }
 
 // Process a command to read all servo positions
@@ -210,11 +177,9 @@ static void process_read_command(void) {
     printf("Positions: ");
     
     for (int i = 1; i <= 6; i++) {
-        uint32_t position = 2048; // Default/fallback value
-        
-        // Try to read the current position
-        if (dxl_read_position(i, &position)) {
-            printf("%d", (int)position);
+        int32_t position;
+        if (state_machine_get_position(i, &position)) {
+            printf("%" PRId32, position);
         } else {
             printf("2048"); // Use default if read fails
         }
@@ -226,6 +191,160 @@ static void process_read_command(void) {
     }
     
     printf("\nOK\n");
+}
+
+// Function declarations
+static void perform_demo_movements(void);
+
+// Function to perform demo movements
+static void perform_demo_movements(void) {
+    ESP_LOGI(TAG, "Starting demo sequence...");
+    
+    // Wait for initial positions to stabilize
+    vTaskDelay(pdMS_TO_TICKS(2000));
+    
+    // Test each joint individually with smaller movements
+    for (int i = 0; i < found_count; i++) {
+        uint8_t id = servo_ids[i];
+        if (id > 4) continue; // Skip gripper motors
+        
+        ESP_LOGI(TAG, "Testing joint %d", id);
+        
+        // Get current position
+        int32_t current_pos;
+        if (!dxl_read_position(id, &current_pos)) {
+            ESP_LOGE(TAG, "Failed to read position for joint %d", id);
+            continue;
+        }
+        
+        // Move slightly in positive direction (smaller movement)
+        pid_controllers[i].target = current_pos + 50;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // Move slightly in negative direction (smaller movement)
+        pid_controllers[i].target = current_pos - 50;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // Return to original position
+        pid_controllers[i].target = current_pos;
+        vTaskDelay(pdMS_TO_TICKS(2000));
+    }
+    
+    // Coordinated arm movement with smaller ranges
+    ESP_LOGI(TAG, "Performing coordinated arm movement");
+    
+    // Move up and to the right (smaller movements)
+    for (int i = 0; i < found_count; i++) {
+        uint8_t id = servo_ids[i];
+        if (id > 4) continue;
+        
+        int32_t current_pos;
+        if (!dxl_read_position(id, &current_pos)) continue;
+        
+        // Different offsets for each joint (reduced from previous values)
+        switch (id) {
+            case 1: // Base rotation
+                pid_controllers[i].target = current_pos + 100;
+                break;
+            case 2: // Shoulder
+                pid_controllers[i].target = current_pos - 75;
+                break;
+            case 3: // Elbow
+                pid_controllers[i].target = current_pos - 50;
+                break;
+            case 4: // Wrist
+                pid_controllers[i].target = current_pos + 25;
+                break;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    // Move up and to the left (smaller movements)
+    for (int i = 0; i < found_count; i++) {
+        uint8_t id = servo_ids[i];
+        if (id > 4) continue;
+        
+        int32_t current_pos;
+        if (!dxl_read_position(id, &current_pos)) continue;
+        
+        // Different offsets for each joint (reduced from previous values)
+        switch (id) {
+            case 1: // Base rotation
+                pid_controllers[i].target = current_pos - 100;
+                break;
+            case 2: // Shoulder
+                pid_controllers[i].target = current_pos - 75;
+                break;
+            case 3: // Elbow
+                pid_controllers[i].target = current_pos - 50;
+                break;
+            case 4: // Wrist
+                pid_controllers[i].target = current_pos + 25;
+                break;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    // Return to initial positions
+    for (int i = 0; i < found_count; i++) {
+        uint8_t id = servo_ids[i];
+        if (id > 4) continue;
+        
+        switch (id) {
+            case 1:
+                pid_controllers[i].target = 2048;
+                break;
+            case 2:
+            case 3:
+            case 4:
+                pid_controllers[i].target = 2000;
+                break;
+        }
+    }
+    vTaskDelay(pdMS_TO_TICKS(3000));
+    
+    ESP_LOGI(TAG, "Demo sequence completed");
+}
+
+// Add this function before the command processing section
+void run_arm_demo(void) {
+    ESP_LOGI(TAG, "Starting arm demo sequence");
+    
+    // Position 1: Initial/Home position
+    ESP_LOGI(TAG, "Moving to home position");
+    state_machine_set_target(1, DXL_CENTER_POSITION);  // Base centered
+    state_machine_set_target(2, MOTOR2_INITIAL_POSITION); // Shoulder back
+    state_machine_set_target(3, MOTOR3_INITIAL_POSITION); // Elbow centered
+    state_machine_set_target(4, MOTOR4_INITIAL_POSITION); // Wrist down
+    vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
+    
+    // Position 2: Arm extended forward
+    ESP_LOGI(TAG, "Moving to extended position");
+    state_machine_set_target(2, 2200);  // Shoulder forward
+    state_machine_set_target(3, 1800);  // Elbow slightly up
+    vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
+    
+    // Position 3: Arm up and ready
+    ESP_LOGI(TAG, "Moving to ready position");
+    state_machine_set_target(2, 2000);  // Shoulder centered
+    state_machine_set_target(3, 2200);  // Elbow up
+    state_machine_set_target(4, 2000);  // Wrist level
+    vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
+    
+    // Position 4: Arm reaching down
+    ESP_LOGI(TAG, "Moving to reach down position");
+    state_machine_set_target(2, 2300);  // Shoulder forward
+    state_machine_set_target(3, 1500);  // Elbow down
+    state_machine_set_target(4, 2500);  // Wrist down
+    vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
+    
+    // Return to home position
+    ESP_LOGI(TAG, "Returning to home position");
+    state_machine_set_target(1, DXL_CENTER_POSITION);
+    state_machine_set_target(2, MOTOR2_INITIAL_POSITION);
+    state_machine_set_target(3, MOTOR3_INITIAL_POSITION);
+    state_machine_set_target(4, MOTOR4_INITIAL_POSITION);
+    ESP_LOGI(TAG, "Demo sequence complete");
 }
 
 // Process incoming serial commands
@@ -258,13 +377,57 @@ static void process_command(const char* cmd) {
             process_read_command();
             break;
             
+        case 'D': // Run demo sequence
+            printf("Starting demo sequence...\n");
+            perform_demo_movements();
+            printf("Demo sequence completed\n");
+            break;
+            
+        case 'd': // Run arm demo sequence
+            run_arm_demo();
+            break;
+            
         default:
             printf("ERROR: Unknown command '%c'\n", cmd[0]);
             break;
     }
 }
 
-// Dynamixel control task
+// User input task
+static void user_input_task(void *pvParameters)
+{
+    // Clear screen and show ready message
+    printf("\033[2J\033[H");
+    printf("\n\n=== SYSTEM READY ===\n");
+    print_main_menu();
+    
+    // Buffer for commands
+    char cmd_buffer[128];
+    int cmd_pos = 0;
+    
+    while (1) {
+        // Check for serial commands
+        int ch = fgetc(stdin);
+        if (ch != EOF) {
+            printf("%c", ch);
+            
+            if (ch == '\n' || ch == '\r') {
+                if (cmd_pos > 0) {
+                    cmd_buffer[cmd_pos] = '\0';
+                    process_command(cmd_buffer);
+                    cmd_pos = 0;
+                    printf("\nEnter command: ");
+                }
+            } else if (cmd_pos < sizeof(cmd_buffer) - 1) {
+                cmd_buffer[cmd_pos++] = (char)ch;
+            }
+        }
+        
+        vTaskDelay(pdMS_TO_TICKS(20));
+    }
+}
+
+// Dynamixel control task (combined with state machine)
 static void dxl_control_task(void *pvParameters)
 {
     // Initialize the Dynamixel interface
@@ -274,81 +437,102 @@ static void dxl_control_task(void *pvParameters)
         return;
     }
     
+    // Initialize the state machine
+    state_machine_init();
+    
     // Scan for connected servos
-    uint8_t servo_ids[MAX_SERVOS] = {0};
     uint16_t model_numbers[MAX_SERVOS] = {0};
-    int found_count = dxl_scan(servo_ids, model_numbers, MAX_SERVOS, MAX_SERVOS);
+    found_count = dxl_scan(servo_ids, model_numbers, MAX_SERVOS, MAX_SERVOS);
     
     if (found_count > 0) {
         ESP_LOGI(TAG, "Found %d servos", found_count);
         
-        // Initialize each servo
+        // Create position command queue
+        position_command_queue = xQueueCreate(10, sizeof(dxl_position_command_t));
+        if (position_command_queue == NULL) {
+            ESP_LOGE(TAG, "Failed to create position command queue");
+            vTaskDelete(NULL);
+            return;
+        }
+        
+        // Initialize each servo and its control structure
         for (int i = 0; i < found_count; i++) {
             uint8_t id = servo_ids[i];
             
-            // Set to position control mode
-            if (dxl_set_operating_mode(id, DXL_OPERATING_MODE_POSITION)) {
-                // Enable torque
-                if (dxl_enable_torque(id)) {
-                    ESP_LOGI(TAG, "Servo ID %d initialized successfully", id);
-                } else {
-                    ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
-                }
-            } else {
-                ESP_LOGE(TAG, "Failed to set operating mode for servo ID %d", id);
+            // Skip if this is a gripper motor (IDs 5-6)
+            if (id > 4) continue;
+            
+            ESP_LOGI(TAG, "Initializing servo ID %d", id);
+            
+            // First disable torque
+            if (!dxl_disable_torque(id)) {
+                ESP_LOGE(TAG, "Failed to disable torque for servo ID %d", id);
+                continue;
             }
-        }
-        
-        // Move all servos to center position
-        for (int i = 0; i < found_count; i++) {
-            dxl_set_position(servo_ids[i], DXL_CENTER_POSITION);
             vTaskDelay(pdMS_TO_TICKS(100));
-        }
-        
-        ESP_LOGI(TAG, "All servos moved to center position");
-        vTaskDelay(pdMS_TO_TICKS(300)); // Reduced delay for stability
-        
-        // Flush stdin to clear any buffered input
-        fflush(stdin);
-        
-        // Clear the screen with ANSI escape sequence
-        printf("\033[2J\033[H");  // Clear screen and position cursor at top
-        printf("\n\n=== SYSTEM READY ===\n");
-        printf("Please wait a moment before entering commands...\n");
-        vTaskDelay(pdMS_TO_TICKS(500));  // Reduced waiting time
-        
-        // Start command processing
-        print_main_menu();
-        
-        // Buffer for storing incoming commands
-        char cmd_buffer[128];
-        int cmd_pos = 0;
-        
-        // Main command processing loop
-        while (1) {
-            // Check for serial commands
-            int ch = fgetc(stdin);
-            if (ch != EOF) {
-                // Echo the character for better UX
-                printf("%c", ch);
-                
-                if (ch == '\n' || ch == '\r') {
-                    // End of command, process it
-                    if (cmd_pos > 0) {
-                        cmd_buffer[cmd_pos] = '\0';
-                        printf("\nProcessing command: %s\n", cmd_buffer);
-                        process_command(cmd_buffer);
-                        cmd_pos = 0;
-                        printf("\nEnter command: ");
-                    }
-                } else if (cmd_pos < sizeof(cmd_buffer) - 1) {
-                    // Add character to command buffer
-                    cmd_buffer[cmd_pos++] = (char)ch;
-                }
+            
+            // Set to PWM mode
+            if (!dxl_set_operating_mode(id, DXL_OPERATING_MODE_PWM)) {
+                ESP_LOGE(TAG, "Failed to set PWM mode for servo ID %d", id);
+                continue;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            // Re-enable torque
+            if (!dxl_enable_torque(id)) {
+                ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
+                continue;
+            }
+            vTaskDelay(pdMS_TO_TICKS(100));
+            
+            // Initialize servo control structure
+            dxl_servo_control_t *control = &servo_controls[i];
+            control->id = id;
+            control->state = DXL_STATE_MOVING;
+            
+            // Set initial position target
+            switch (id) {
+                case 1: control->target_position = 2048; break;  // Center position
+                case 2: control->target_position = 2000; break;  // Slightly forward
+                case 3: control->target_position = 2000; break;  // Slightly forward
+                case 4: control->target_position = 2000; break;  // Slightly forward
+                default: control->target_position = 2048; break;
             }
             
-            // Delay to prevent CPU hogging - increased for monitor mode
-            vTaskDelay(pdMS_TO_TICKS(50));
+            // Set PWM limits based on servo ID
+            switch (id) {
+                case 1: // Base rotation
+                    control->max_moving_pwm = 200;
+                    control->max_holding_pwm = 50;
+                    break;
+                case 2: // Shoulder
+                    control->max_moving_pwm = -400;
+                    control->max_holding_pwm = -250;
+                    break;
+                case 3: // Elbow
+                    control->max_moving_pwm = -300;
+                    control->max_holding_pwm = -200;
+                    break;
+                case 4: // Wrist
+                    control->max_moving_pwm = 200;
+                    control->max_holding_pwm = 50;
+                    break;
+            }
+            
+            // Initialize PID controller
+            init_pid_controller(&pid_controllers[i], 0.2f, 0.01f, 0.005f, control->max_moving_pwm);
+            pid_controllers[i].target = control->target_position;
+            
+            ESP_LOGI(TAG, "Servo ID %d initialized with moving PWM %d and holding PWM %d",
+                     id, control->max_moving_pwm, control->max_holding_pwm);
+        }
+        
+        // Main control loop
+        while (1) {
+            // Update the state machine
+            state_machine_update();
+            
+            vTaskDelay(pdMS_TO_TICKS(20));
         }
     } else {
         ESP_LOGE(TAG, "No servos found!");
@@ -380,5 +564,8 @@ void app_main(void)
     
     // Create the Dynamixel control task
     xTaskCreate(dxl_control_task, "dxl_task", 8192, NULL, 5, NULL);
+    
+    // Create the user input task
+    xTaskCreate(user_input_task, "user_input", 4096, NULL, 4, NULL);
 }
 
