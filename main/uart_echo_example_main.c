@@ -42,12 +42,15 @@
 #define MAX_SERVOS     4
 
 // Add after other defines
-#define POSITION_CONTROL_STACK_SIZE 4096
+#define POSITION_CONTROL_STACK_SIZE 8192
 #define POSITION_CONTROL_PRIORITY 5
-#define POSITION_CONTROL_PERIOD_MS 20
+#define POSITION_CONTROL_PERIOD_MS 100
+#define USER_INPUT_STACK_SIZE 8192
+#define USER_INPUT_PRIORITY 6
+#define USER_INPUT_PERIOD_MS 10
 
 // Add these constants near the top with other constants
-#define DEMO_POSITION_DELAY_MS 2000  // Time to hold each position
+#define DEMO_POSITION_DELAY_MS 4000  // Time to hold each position (4 seconds)
 
 // Global variables for servo control
 static uint8_t servo_ids[MAX_SERVOS] = {0};
@@ -55,6 +58,10 @@ static int found_count = 0;
 static pid_controller_t pid_controllers[MAX_SERVOS];
 static QueueHandle_t position_command_queue;
 static dxl_servo_control_t servo_controls[MAX_SERVOS];
+
+// Set logging levels
+#define DYNAMIXEL_LOG_LEVEL ESP_LOG_ERROR  // Only show errors
+#define STATE_MACHINE_LOG_LEVEL ESP_LOG_ERROR  // Only show errors
 
 // Initialize console for input
 static void init_console(void)
@@ -104,8 +111,8 @@ static void print_main_menu()
     printf("M2048,2048,2048,2048,2048,2048 - Move all servos to specified positions\n");
     printf("C - Center all servos\n");
     printf("R - Read all servo positions\n");
-    printf("D - Run demo sequence\n");
     printf("d - Run arm demo sequence\n");
+    printf("Iangle1,angle2,angle3,angle4,angle5,angle6 - Move to joint angles\n");
     printf("\nWaiting for commands...\n");
 }
 
@@ -322,6 +329,7 @@ void run_arm_demo(void) {
     ESP_LOGI(TAG, "Moving to extended position");
     state_machine_set_target(2, 2200);  // Shoulder forward
     state_machine_set_target(3, 1800);  // Elbow slightly up
+    state_machine_set_target(4, 1450);  // Wrist up
     vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
     
     // Position 3: Arm up and ready
@@ -345,6 +353,36 @@ void run_arm_demo(void) {
     state_machine_set_target(3, MOTOR3_INITIAL_POSITION);
     state_machine_set_target(4, MOTOR4_INITIAL_POSITION);
     ESP_LOGI(TAG, "Demo sequence complete");
+}
+
+// Process IK command
+static void process_ik_command(const char* cmd) {
+    float angles[6];  // Array to store joint angles
+    if (sscanf(cmd, "I%f,%f,%f,%f,%f,%f", 
+               &angles[0], &angles[1], &angles[2], 
+               &angles[3], &angles[4], &angles[5]) == 6) {
+        printf("Moving to joint angles: %.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", 
+               angles[0], angles[1], angles[2], angles[3], angles[4], angles[5]);
+        
+        // First move to home position
+        printf("Moving to home position first...\n");
+        process_center_command();
+        
+        // Wait for servos to reach home position
+        vTaskDelay(pdMS_TO_TICKS(2000));
+        
+        // Convert angles to positions and move servos
+        for (int i = 0; i < 6; i++) {
+            // Convert angle to position (assuming 0-4095 range)
+            // You might need to adjust this conversion based on your servo's range
+            int position = (int)(2048 + (angles[i] * 4095 / 360.0));
+            char servo_cmd[16];
+            snprintf(servo_cmd, sizeof(servo_cmd), "S%dP%d", i+1, position);
+            process_servo_command(servo_cmd);
+        }
+    } else {
+        printf("ERROR: Invalid IK command format. Use: Iangle1,angle2,angle3,angle4,angle5,angle6\n");
+    }
 }
 
 // Process incoming serial commands
@@ -377,14 +415,12 @@ static void process_command(const char* cmd) {
             process_read_command();
             break;
             
-        case 'D': // Run demo sequence
-            printf("Starting demo sequence...\n");
-            perform_demo_movements();
-            printf("Demo sequence completed\n");
-            break;
-            
         case 'd': // Run arm demo sequence
             run_arm_demo();
+            break;
+            
+        case 'I': // Move to joint angles
+            process_ik_command(cmd);
             break;
             
         default:
@@ -423,7 +459,7 @@ static void user_input_task(void *pvParameters)
             }
         }
         
-        vTaskDelay(pdMS_TO_TICKS(20));
+        vTaskDelay(pdMS_TO_TICKS(USER_INPUT_PERIOD_MS));
     }
 }
 
@@ -502,20 +538,20 @@ static void dxl_control_task(void *pvParameters)
             // Set PWM limits based on servo ID
             switch (id) {
                 case 1: // Base rotation
-                    control->max_moving_pwm = 200;
-                    control->max_holding_pwm = 50;
+                    control->max_moving_pwm = MOTOR1_MOVING_PWM;
+                    control->max_holding_pwm = MOTOR1_HOLDING_PWM;
                     break;
                 case 2: // Shoulder
-                    control->max_moving_pwm = -400;
-                    control->max_holding_pwm = -250;
+                    control->max_moving_pwm = MOTOR2_MOVING_PWM;
+                    control->max_holding_pwm = MOTOR2_HOLDING_PWM;
                     break;
                 case 3: // Elbow
-                    control->max_moving_pwm = -300;
-                    control->max_holding_pwm = -200;
+                    control->max_moving_pwm = MOTOR3_MOVING_PWM;
+                    control->max_holding_pwm = MOTOR3_HOLDING_PWM;
                     break;
                 case 4: // Wrist
-                    control->max_moving_pwm = 200;
-                    control->max_holding_pwm = 50;
+                    control->max_moving_pwm = MOTOR4_MOVING_PWM;
+                    control->max_holding_pwm = MOTOR4_HOLDING_PWM;
                     break;
             }
             
@@ -532,7 +568,7 @@ static void dxl_control_task(void *pvParameters)
             // Update the state machine
             state_machine_update();
             
-            vTaskDelay(pdMS_TO_TICKS(20));
+            vTaskDelay(pdMS_TO_TICKS(POSITION_CONTROL_PERIOD_MS));
         }
     } else {
         ESP_LOGE(TAG, "No servos found!");
@@ -558,14 +594,16 @@ void app_main(void)
     // Initialize console for input
     init_console();
     
+    // Set logging levels
+    esp_log_level_set("DYNAMIXEL", DYNAMIXEL_LOG_LEVEL);
+    esp_log_level_set("STATE_MACHINE", STATE_MACHINE_LOG_LEVEL);
+    
     ESP_LOGI(TAG, "ESP32 Dynamixel Library Example");
     ESP_LOGI(TAG, "Using UART%d: TX=%d, RX=%d, DIR=%d, Baudrate=%d", 
              DXL_UART_NUM, DXL_TX_PIN, DXL_RX_PIN, DXL_DIR_PIN, (int)DXL_BAUDRATE);
     
-    // Create the Dynamixel control task
-    xTaskCreate(dxl_control_task, "dxl_task", 8192, NULL, 5, NULL);
-    
-    // Create the user input task
-    xTaskCreate(user_input_task, "user_input", 4096, NULL, 4, NULL);
+    // Create tasks with adjusted priorities and stack sizes
+    xTaskCreate(user_input_task, "user_input", USER_INPUT_STACK_SIZE, NULL, USER_INPUT_PRIORITY, NULL);
+    xTaskCreate(dxl_control_task, "dxl_control", POSITION_CONTROL_STACK_SIZE, NULL, POSITION_CONTROL_PRIORITY, NULL);
 }
 
