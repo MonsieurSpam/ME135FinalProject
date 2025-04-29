@@ -196,19 +196,14 @@ void state_machine_update(void)
         // Calculate error
         float error = target_pos - current_pos;
         
-        // Special handling for motor 2 (shoulder)
-        if (id == 2) {
-            // Invert error for motor 2
-            error = -error;
-            
-            // Ensure position limits
-            if (current_pos < MOTOR2_MIN_POSITION) {
-                current_pos = MOTOR2_MIN_POSITION;
-                error = 0;
-            } else if (current_pos > MOTOR2_MAX_POSITION) {
-                current_pos = MOTOR2_MAX_POSITION;
-                error = 0;
-            }
+        // Remove special handling for motor 2
+        // Ensure position limits for all motors
+        if (current_pos < MOTOR2_MIN_POSITION) {
+            current_pos = MOTOR2_MIN_POSITION;
+            error = 0;
+        } else if (current_pos > MOTOR2_MAX_POSITION) {
+            current_pos = MOTOR2_MAX_POSITION;
+            error = 0;
         }
         
         // Update PID controller

@@ -171,7 +171,27 @@ static void process_center_command(void) {
     bool success = true;
     for (int i = 0; i < found_count && i < MAX_SERVOS; i++) {
         uint8_t id = servo_ids[i];
-        int32_t position = (id == 1) ? 2048 : 2000; // Center position
+        int32_t position;
+        
+        // Use initial positions from motor_parameters.h
+        switch(id) {
+            case 1:
+                position = MOTOR1_CENTER_POSITION;  // Base
+                break;
+            case 2:
+                position = MOTOR2_INITIAL_POSITION;  // Shoulder
+                break;
+            case 3:
+                position = MOTOR3_INITIAL_POSITION;  // Elbow
+                break;
+            case 4:
+                position = MOTOR4_INITIAL_POSITION;  // Wrist
+                break;
+            default:
+                position = 2048;  // Default center position for any other servos
+                break;
+        }
+        
         if (!state_machine_set_target(id, position)) {
             success = false;
         }
@@ -357,12 +377,11 @@ void run_arm_demo(void) {
 
 // Process IK command
 static void process_ik_command(const char* cmd) {
-    float angles[6];  // Array to store joint angles
-    if (sscanf(cmd, "I%f,%f,%f,%f,%f,%f", 
-               &angles[0], &angles[1], &angles[2], 
-               &angles[3], &angles[4], &angles[5]) == 6) {
-        printf("Moving to joint angles: %.2f,%.2f,%.2f,%.2f,%.2f,%.2f\n", 
-               angles[0], angles[1], angles[2], angles[3], angles[4], angles[5]);
+    float angles[4];  // Array to store joint angles
+    if (sscanf(cmd, "I%f,%f,%f,%f", 
+               &angles[0], &angles[1], &angles[2], &angles[3]) == 4) {
+        printf("Moving to joint angles: %.2f,%.2f,%.2f,%.2f\n", 
+               angles[0], angles[1], angles[2], angles[3]);
         
         // First move to home position
         printf("Moving to home position first...\n");
@@ -372,16 +391,23 @@ static void process_ik_command(const char* cmd) {
         vTaskDelay(pdMS_TO_TICKS(2000));
         
         // Convert angles to positions and move servos
-        for (int i = 0; i < 6; i++) {
-            // Convert angle to position (assuming 0-4095 range)
-            // You might need to adjust this conversion based on your servo's range
-            int position = (int)(2048 + (angles[i] * 4095 / 360.0));
+        int positions[4];
+        
+        // Standard Dynamixel mapping for all joints:
+        // 180° -> 2048 (center)
+        // 90° -> 1024 (90° clockwise)
+        // 270° -> 3072 (90° counterclockwise)
+        for (int i = 0; i < 4; i++) {
+            positions[i] = 2048 + (int)((angles[i] - 180.0f) * (1024.0f / 90.0f));
+            
+            // Send command to servo
             char servo_cmd[16];
-            snprintf(servo_cmd, sizeof(servo_cmd), "S%dP%d", i+1, position);
+            snprintf(servo_cmd, sizeof(servo_cmd), "S%dP%d", i+1, positions[i]);
             process_servo_command(servo_cmd);
+            printf("Joint %d: angle=%.2f° -> position=%d\n", i+1, angles[i], positions[i]);
         }
     } else {
-        printf("ERROR: Invalid IK command format. Use: Iangle1,angle2,angle3,angle4,angle5,angle6\n");
+        printf("ERROR: Invalid IK command format. Use: Iangle1,angle2,angle3,angle4\n");
     }
 }
 
