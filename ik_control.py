@@ -52,45 +52,27 @@ class RobotController:
             print(f"Received: {response}")
             response = self.serial.readline().decode().strip()
     
-    def move_to_position(self, x, y, z, visualize=False):
+    def move_to_position(self, x, y, z, visualize=False, visualize_only=False):
         """Move the arm to a specific position using IK"""
         # Calculate IK solution
         print(f"Calculating IK for position ({x}, {y}, {z})...")
         joint_angles = self.ik_solver.inverse_kinematics([x, y, z])
         
+        if joint_angles is None:
+            print("Error: Could not find valid IK solution")
+            return
+        
         # Convert angles to degrees
         joint_angles_deg = np.degrees(joint_angles)
-        print(f"Raw IK joint angles (degrees): {joint_angles_deg}")
+        print(f"Joint angles (degrees): {joint_angles_deg}")
         
-        # Adjust angles based on joint-specific orientations
-        adjusted_angles = np.zeros(4)
-        
-        # Joint 1 (Base): Add 180° to keep it centered
-        adjusted_angles[0] = joint_angles_deg[0] + 180.0
-        
-        # Joint 2 (Shoulder): 270° is forward straight, 180° is straight up, 140° is max back
-        # IK gives angles where 0° is straight up, so we need to add 180° to match our convention
-        adjusted_angles[1] = joint_angles_deg[1] + 180.0
-        
-        # Joint 3 (Elbow): 
-        # 180° is perpendicular to shoulder (pointing straight out)
-        # 90° is parallel to shoulder (pointing along shoulder)
-        # 270° points back towards shoulder (curled up)
-        # IK gives angles where 0° is parallel to shoulder, 90° is perpendicular
-        adjusted_angles[2] = joint_angles_deg[2] + 90.0  # Add 90° to match our convention
-        
-        # Joint 4 (Wrist): 180° points forward, 90° points up, 270° points down
-        # IK gives angles where 0° is straight, so we need to add 180° to match our convention
-        adjusted_angles[3] = joint_angles_deg[3] + 180.0
-        
-        print(f"Adjusted joint angles (degrees): {adjusted_angles}")
-        
-        # Send the adjusted angles to ESP32
-        angles_str = ','.join([f"{angle:.2f}" for angle in adjusted_angles])
-        self.send_command(f"I{angles_str}")
-        
-        # Wait for the movement to complete
-        time.sleep(4)  # Adjust this based on your movement time
+        if not visualize_only:
+            # Send angles using I command format
+            angles_str = ','.join([f"{angle:.2f}" for angle in joint_angles_deg])
+            self.send_command(f"I{angles_str}")
+            
+            # Wait for the movement to complete
+            time.sleep(4)  # Adjust this based on your movement time
         
         if visualize:
             try:
@@ -114,6 +96,8 @@ def main():
                        help='Target position in meters')
     parser.add_argument('--visualize', action='store_true',
                        help='Visualize the robot configuration')
+    parser.add_argument('--visualize-only', action='store_true',
+                       help='Only visualize the robot configuration without moving it')
     args = parser.parse_args()
     
     try:
@@ -123,7 +107,7 @@ def main():
         if args.position:
             # Move to specified position
             x, y, z = args.position
-            controller.move_to_position(x, y, z, args.visualize)
+            controller.move_to_position(x, y, z, args.visualize, args.visualize_only)
         else:
             # Interactive mode
             while True:
@@ -134,7 +118,7 @@ def main():
                     z = float(input("Enter Z position (meters): "))
                     
                     # Move to the target position
-                    controller.move_to_position(x, y, z, args.visualize)
+                    controller.move_to_position(x, y, z, args.visualize, args.visualize_only)
                     
                 except ValueError:
                     print("Invalid input. Please enter numbers only.")
