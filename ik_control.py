@@ -62,13 +62,39 @@ class RobotController:
             print("Error: Could not find valid IK solution")
             return
         
-        # Convert angles to degrees
-        joint_angles_deg = np.degrees(joint_angles)
-        print(f"Joint angles (degrees): {joint_angles_deg}")
+        # Convert IKPy angles to Dynamixel angles
+        dynamixel_positions = self.ik_solver.angles_to_dynamixel(joint_angles)
         
         if not visualize_only:
+            # Convert IKPy angles to degrees for sending to ESP32
+            joint_angles_deg = np.degrees(joint_angles)
+            
+            # Transform angles to match Dynamixel coordinate system
+            angles_deg = []
+            for i, angle in enumerate(joint_angles_deg):
+                if i == 0:  # Base
+                    angle_deg = 180 + angle  # Shift to match Dynamixel range
+                elif i == 1:  # Shoulder
+                    angle_deg = 270 + angle  # Shift to match Dynamixel range
+                elif i == 2:  # Elbow
+                    angle_deg = 90 + angle  # Shift to match Dynamixel range (90° is straight)
+                elif i == 3:  # Wrist rotation
+                    angle_deg = 90 + angle  # Shift to match Dynamixel range
+                elif i == 4:  # Wrist pitch
+                    angle_deg = angle  # Already in correct range
+                elif i == 5:  # Gripper
+                    angle_deg = angle  # Already in correct range
+                
+                # Ensure angle is within 0-360° range
+                if angle_deg < 0:
+                    angle_deg += 360
+                elif angle_deg >= 360:
+                    angle_deg -= 360
+                
+                angles_deg.append(angle_deg)
+            
             # Send angles using I command format
-            angles_str = ','.join([f"{angle:.2f}" for angle in joint_angles_deg])
+            angles_str = ','.join([f"{angle:.2f}" for angle in angles_deg])
             self.send_command(f"I{angles_str}")
             
             # Wait for the movement to complete

@@ -89,15 +89,15 @@ class RobotArmIKPy:
             ]
         )
         
-        # Convert degree limits to radians for IKPy
-        # These are the raw angle limits for IKPy calculations
+        # Convert Dynamixel limits to IKPy limits
+        # For each joint, we need to convert from Dynamixel range to IKPy range
         self.joint_limits = [
-            [-pi/2, pi/2],     # Joint 1: [-90°, 90°]
-            [-pi/2, pi/2],     # Joint 2: [-90°, 90°]
-            [-pi/2, pi/2],     # Joint 3: [-90°, 90°]
-            [-pi/2, pi/2],     # Joint 4: [-90°, 90°]
-            [-pi/4, pi/4],     # Joint 5: [-45°, 45°]
-            [-pi/2, pi/2]      # Joint 6: [-90°, 90°]
+            [-pi/2, pi/2],     # Joint 1: [-90°, 90°] (matches Dynamixel 90° to 270°)
+            [-pi/2, 0],        # Joint 2: [-90°, 0°] (matches Dynamixel 140° to 270°)
+            [0, pi/2],         # Joint 3: [0°, 90°] (matches Dynamixel 180° to 270°)
+            [0, pi/2],         # Joint 4: [0°, 90°] (matches Dynamixel 90° to 180°)
+            [-pi/4, pi/4],     # Joint 5: [-45°, 45°] (matches Dynamixel 0° to 90°)
+            [-pi/2, pi/2]      # Joint 6: [-90°, 90°] (matches Dynamixel 0° to 180°)
         ]
         
         # Save the dynamixel position limits and angle ranges for conversion
