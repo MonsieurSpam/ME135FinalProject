@@ -93,9 +93,9 @@ class RobotArmIKPy:
         # For each joint, we need to convert from Dynamixel range to IKPy range
         self.joint_limits = [
             [-pi/2, pi/2],     # Joint 1: [-90°, 90°] (matches Dynamixel 90° to 270°)
-            [-pi/2, 0],        # Joint 2: [-90°, 0°] (matches Dynamixel 140° to 270°)
-            [0, pi/2],         # Joint 3: [0°, 90°] (matches Dynamixel 180° to 270°)
-            [0, pi/2],         # Joint 4: [0°, 90°] (matches Dynamixel 90° to 180°)
+            [-pi/2, pi/2],     # Joint 2: [-90°, 90°] (matches Dynamixel 140° to 270°)
+            [0, pi],           # Joint 3: [0°, 180°] (matches Dynamixel 180° to 270°)
+            [-pi/2, pi/2],     # Joint 4: [-90°, 90°] (matches Dynamixel 90° to 270°)
             [-pi/4, pi/4],     # Joint 5: [-45°, 45°] (matches Dynamixel 0° to 90°)
             [-pi/2, pi/2]      # Joint 6: [-90°, 90°] (matches Dynamixel 0° to 180°)
         ]
@@ -248,17 +248,15 @@ class RobotArmIKPy:
                 # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
                 angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
             elif i == 1:  # Shoulder
-                # IKPy: -90° to 90° -> Dynamixel: 140° to 270°
-                # Negative IKPy angle means bending backward
-                angle_deg = 270 + angle_deg  # Shift to match Dynamixel range
+                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
+                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
+                angle_deg = max(140, angle_deg)
             elif i == 2:  # Elbow
-                # IKPy: -90° to 90° -> Dynamixel: 180° to 270°
-                # Negative IKPy angle means bending backward
-                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
+                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
+                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
             elif i == 3:  # Wrist rotation
-                # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
-                # 0° in IKPy should be 90° in Dynamixel (pointing up)
-                angle_deg = 90 + angle_deg  # Shift to match Dynamixel range
+                # Fixed joint, always at 180° in Dynamixel
+                angle_deg = 180
             elif i == 4:  # Wrist pitch
                 # IKPy: -45° to 45° -> Dynamixel: 0° to 45°
                 angle_deg = angle_deg  # Already in correct range
@@ -519,9 +517,46 @@ def main():
                     
                     # Connect to ESP32
                     if interface.connect():
-                        # Set the servo positions
-                        success = interface.set_all_servo_positions(positions)
-                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
+                        # Convert to Dynamixel angles in degrees
+                        angles_deg = []
+                        for i, angle in enumerate(joint_angles):
+                            # Get the limits for this joint
+                            min_pos, max_pos, min_deg, max_deg = robot.joint_dxl_limits[i]
+                            
+                            # Convert angle to degrees
+                            angle_deg = degrees(angle)
+                            
+                            # Transform angles to match Dynamixel coordinate system
+                            if i == 0:  # Base
+                                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
+                            elif i == 1:  # Shoulder
+                                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
+                                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
+                                angle_deg = max(140, angle_deg)
+                            elif i == 2:  # Elbow
+                                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
+                                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
+                            elif i == 3:  # Wrist rotation
+                                # Fixed joint, always at 180° in Dynamixel
+                                angle_deg = 180
+                            elif i == 4:  # Wrist pitch
+                                angle_deg = angle_deg  # Already in correct range
+                            elif i == 5:  # Gripper
+                                angle_deg = angle_deg  # Already in correct range
+                            
+                            # Ensure angle is within 0-360° range
+                            if angle_deg < 0:
+                                angle_deg += 360
+                            elif angle_deg >= 360:
+                                angle_deg -= 360
+                            
+                            angles_deg.append(angle_deg)
+                        
+                        # Send the Dynamixel angles
+                        command = "I" + ",".join([f"{angle:.2f}" for angle in angles_deg])
+                        print(f"\nSending command to ESP32: {command}")
+                        success = interface.send_command(command)
+                        print(f"Sending angles to ESP32: {'Success' if success else 'Failed'}")
                         
                         # Disconnect from ESP32
                         interface.disconnect()
@@ -655,9 +690,46 @@ def main():
                     
                     # Connect to ESP32
                     if interface.connect():
-                        # Set the servo positions
-                        success = interface.set_all_servo_positions(dynamixel_positions)
-                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
+                        # Convert to Dynamixel angles in degrees
+                        angles_deg = []
+                        for i, angle in enumerate(joint_angles):
+                            # Get the limits for this joint
+                            min_pos, max_pos, min_deg, max_deg = robot.joint_dxl_limits[i]
+                            
+                            # Convert angle to degrees
+                            angle_deg = degrees(angle)
+                            
+                            # Transform angles to match Dynamixel coordinate system
+                            if i == 0:  # Base
+                                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
+                            elif i == 1:  # Shoulder
+                                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
+                                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
+                                angle_deg = max(140, angle_deg)
+                            elif i == 2:  # Elbow
+                                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
+                                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
+                            elif i == 3:  # Wrist rotation
+                                # Fixed joint, always at 180° in Dynamixel
+                                angle_deg = 180
+                            elif i == 4:  # Wrist pitch
+                                angle_deg = angle_deg  # Already in correct range
+                            elif i == 5:  # Gripper
+                                angle_deg = angle_deg  # Already in correct range
+                            
+                            # Ensure angle is within 0-360° range
+                            if angle_deg < 0:
+                                angle_deg += 360
+                            elif angle_deg >= 360:
+                                angle_deg -= 360
+                            
+                            angles_deg.append(angle_deg)
+                        
+                        # Send the Dynamixel angles
+                        command = "I" + ",".join([f"{angle:.2f}" for angle in angles_deg])
+                        print(f"\nSending command to ESP32: {command}")
+                        success = interface.send_command(command)
+                        print(f"Sending angles to ESP32: {'Success' if success else 'Failed'}")
                         
                         # Disconnect from ESP32
                         interface.disconnect()
