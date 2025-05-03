@@ -37,9 +37,7 @@ typedef struct {
     dxl_state_t state;              // Current state
     int32_t target_position;        // Target position
     int32_t current_position;       // Current position
-    int16_t current_pwm;            // Current PWM value
-    int16_t max_moving_pwm;         // Maximum PWM for movement
-    int16_t max_holding_pwm;        // Maximum PWM for holding
+    int32_t current_velocity;      // Current velocity
     pid_controller_t pid;           // PID controller
     uint32_t last_update_time;      // Last update timestamp
 } dxl_servo_control_t;
@@ -65,8 +63,8 @@ dxl_state_t state_machine_get_state(uint8_t id);
 // Get current position of a servo
 bool state_machine_get_position(uint8_t id, int32_t *position);
 
-// Get current PWM of a servo
-bool state_machine_get_pwm(uint8_t id, int16_t *pwm);
+// Get current velocity of a servo
+bool state_machine_get_velocity(uint8_t id, int32_t *velocity);
 
 // Emergency stop all servos
 void state_machine_emergency_stop(void);

@@ -11,12 +11,16 @@
 #define TAG "STATE_MACHINE"
 
 // Constants
-#define UPDATE_PERIOD_MS 50  // Increased from 20ms to slow down control rate
+#define UPDATE_PERIOD_MS 50
 #define POSITION_ERROR_THRESHOLD 20
 #define HOLDING_ERROR_THRESHOLD 100
 #define MAX_SERVOS 4
-#define DIRECTION_CHANGE_THRESHOLD 50  // New threshold for detecting direction changes
-#define DEADBAND_COMPENSATION 50  // Added deadband compensation
+#define DIRECTION_CHANGE_THRESHOLD 50
+#define DEADBAND_THRESHOLD 10
+#define HOLDING_STATE_THRESHOLD 15
+#define MAX_VELOCITY 265  // Maximum velocity value for Dynamixel
+#define MIN_VELOCITY -265 // Minimum velocity value
+#define HOLDING_VELOCITY 0 // Velocity when holding position
 #define MOTOR2_FORWARD_HOLDING_PWM 600  // Higher holding PWM for forward positions
 #define MOTOR2_FORWARD_THRESHOLD 2100   // Position threshold where we consider it "forward"
 #define MOTOR3_FORWARD_HOLDING_PWM 600  // Higher holding PWM for forward positions
@@ -48,51 +52,37 @@ float update_pid(pid_controller_t* pid, float current_position) {
     // Calculate error (target - current)
     float error = pid->target - current_position;
     
-    // Calculate proportional term with increased gain for larger errors
+    // Apply deadband
+    if (fabsf(error) < DEADBAND_THRESHOLD) {
+        return 0.0f;
+    }
+    
+    // Calculate proportional term
     float p_term = pid->kp * error;
-    if (fabsf(error) > 100) {
-        p_term *= 1.5f; // Increased from 0.8f for more aggressive response
-    }
     
-    // Add deadband compensation for large errors
-    if (fabsf(error) > 200) {
-        p_term += (error > 0 ? DEADBAND_COMPENSATION : -DEADBAND_COMPENSATION);
-    }
-    
-    // Update integral term with anti-windup and direction change detection
+    // Update integral term with anti-windup
     float i_term = pid->ki * pid->integral;
-    
-    // Check for direction change
-    if (fabsf(error) > DIRECTION_CHANGE_THRESHOLD) {
-        // If error sign changed significantly, reset integral
-        if ((error * pid->prev_error) < 0) {
-            pid->integral = 0.0f;
-            ESP_LOGI(TAG, "Direction change detected, resetting integral");
-        }
-    }
-    
     if (fabsf(i_term) < pid->integral_limit) {
         pid->integral += error;
     } else {
-        // Reset integral if we're at the limit
         pid->integral = 0.0f;
     }
     
-    // Calculate derivative term with smoothing and direction change handling
+    // Calculate derivative term
     float d_term = pid->kd * (error - pid->prev_error);
     pid->prev_error = error;
     
-    // Calculate total output
-    float output = p_term + i_term + d_term;
+    // Calculate total output (velocity)
+    float velocity = p_term + i_term + d_term;
     
-    // Limit output to max current while preserving sign
-    if (output > 0) {
-        output = fminf(output, pid->max_current);
+    // Limit velocity
+    if (velocity > 0) {
+        velocity = fminf(velocity, MAX_VELOCITY);
     } else {
-        output = fmaxf(output, -pid->max_current);
+        velocity = fmaxf(velocity, MIN_VELOCITY);
     }
     
-    return output;
+    return velocity;
 }
 
 // Helper function to find servo control by ID
@@ -137,39 +127,30 @@ void state_machine_init(void) {
         control->id = id;
         control->state = DXL_STATE_MOVING;
         
-        // Set initial position and PWM limits based on motor ID
+        // Set initial position and velocity limits based on motor ID
         switch (id) {
             case 1: // Base rotation
                 control->target_position = MOTOR1_CENTER_POSITION;
-                control->max_moving_pwm = MOTOR1_MOVING_PWM;
-                control->max_holding_pwm = MOTOR1_HOLDING_PWM;
-                init_pid_controller(&pid_controllers[i], MOTOR1_KP, MOTOR1_KI, MOTOR1_KD, control->max_moving_pwm);
+                init_pid_controller(&pid_controllers[i], MOTOR1_KP, MOTOR1_KI, MOTOR1_KD, MOTOR1_MAX_VELOCITY);
                 break;
             case 2: // Shoulder
                 control->target_position = MOTOR2_INITIAL_POSITION;
-                control->max_moving_pwm = MOTOR2_MOVING_PWM;
-                control->max_holding_pwm = MOTOR2_HOLDING_PWM;
-                init_pid_controller(&pid_controllers[i], MOTOR2_KP, MOTOR2_KI, MOTOR2_KD, control->max_moving_pwm);
-                ESP_LOGI(TAG, "Motor 2 (Shoulder) initialized with target position %" PRId32, control->target_position);
+                init_pid_controller(&pid_controllers[i], MOTOR2_KP, MOTOR2_KI, MOTOR2_KD, MOTOR2_MAX_VELOCITY);
                 break;
             case 3: // Elbow
                 control->target_position = MOTOR3_INITIAL_POSITION;
-                control->max_moving_pwm = MOTOR3_MOVING_PWM;
-                control->max_holding_pwm = MOTOR3_HOLDING_PWM;
-                init_pid_controller(&pid_controllers[i], MOTOR3_KP, MOTOR3_KI, MOTOR3_KD, control->max_moving_pwm);
+                init_pid_controller(&pid_controllers[i], MOTOR3_KP, MOTOR3_KI, MOTOR3_KD, MOTOR3_MAX_VELOCITY);
                 break;
             case 4: // Wrist
                 control->target_position = MOTOR4_INITIAL_POSITION;
-                control->max_moving_pwm = MOTOR4_MOVING_PWM;
-                control->max_holding_pwm = MOTOR4_HOLDING_PWM;
-                init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, control->max_moving_pwm);
+                init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, MOTOR4_MAX_VELOCITY);
                 break;
         }
         
         pid_controllers[i].target = control->target_position;
         
-        ESP_LOGI(TAG, "Motor %d initialized with moving PWM %d and holding PWM %d",
-                 id, control->max_moving_pwm, control->max_holding_pwm);
+        ESP_LOGI(TAG, "Motor %d initialized with max velocity %" PRId32,
+                 id, (int32_t)pid_controllers[i].max_current);
     }
 
     // Initialize position command queue
@@ -177,63 +158,65 @@ void state_machine_init(void) {
 }
 
 // Update the state machine
-void state_machine_update(void)
-{
+void state_machine_update(void) {
     for (int i = 0; i < found_count; i++) {
-        uint8_t id = servo_controls[i].id;
-        if (id > 4) continue; // Skip gripper motors
+        if (servo_controls[i].id == 0) continue; // Skip unused slots
         
         // Read current position
         int32_t current_pos;
-        if (!dxl_read_position(id, &current_pos)) {
-            ESP_LOGE(TAG, "Failed to read position for servo ID %d", id);
+        if (!dxl_read_position(servo_controls[i].id, &current_pos)) {
+            ESP_LOGE(TAG, "Failed to read position for servo ID %d", servo_controls[i].id);
             continue;
         }
-        
-        // Get target position from PID controller
-        int32_t target_pos = pid_controllers[i].target;
+        servo_controls[i].current_position = current_pos;
         
         // Calculate error
+        int32_t target_pos = servo_controls[i].target_position;
         float error = target_pos - current_pos;
         
-        // Remove special handling for motor 2
-        // Ensure position limits for all motors
-        if (current_pos < MOTOR2_MIN_POSITION) {
-            current_pos = MOTOR2_MIN_POSITION;
-            error = 0;
-        } else if (current_pos > MOTOR2_MAX_POSITION) {
-            current_pos = MOTOR2_MAX_POSITION;
-            error = 0;
+        // Calculate PID output
+        float pid_output = update_pid(&pid_controllers[i], current_pos);
+        
+        // Convert PID output to velocity
+        int32_t velocity = (int32_t)pid_output;
+        
+        // Limit velocity based on motor parameters
+        switch (servo_controls[i].id) {
+            case 1: velocity = (velocity > MOTOR1_MAX_VELOCITY) ? MOTOR1_MAX_VELOCITY : 
+                             (velocity < -MOTOR1_MAX_VELOCITY) ? -MOTOR1_MAX_VELOCITY : velocity; break;
+            case 2: velocity = (velocity > MOTOR2_MAX_VELOCITY) ? MOTOR2_MAX_VELOCITY : 
+                             (velocity < -MOTOR2_MAX_VELOCITY) ? -MOTOR2_MAX_VELOCITY : velocity; break;
+            case 3: velocity = (velocity > MOTOR3_MAX_VELOCITY) ? MOTOR3_MAX_VELOCITY : 
+                             (velocity < -MOTOR3_MAX_VELOCITY) ? -MOTOR3_MAX_VELOCITY : velocity; break;
+            case 4: velocity = (velocity > MOTOR4_MAX_VELOCITY) ? MOTOR4_MAX_VELOCITY : 
+                             (velocity < -MOTOR4_MAX_VELOCITY) ? -MOTOR4_MAX_VELOCITY : velocity; break;
         }
         
-        // Update PID controller
-        float output = update_pid(&pid_controllers[i], current_pos);
+        // Set velocity based on state
+        if (servo_controls[i].state == DXL_STATE_HOLDING) {
+            velocity = 0;  // Stop when holding position
+        }
         
-        // Apply PWM limits based on servo ID
-        int16_t pwm = 0;
-        if (fabsf(error) > 5.0f) { // Moving state
-            switch (id) {
-                case 1: pwm = (int16_t)fminf(fmaxf(output, -MOTOR1_MOVING_PWM), MOTOR1_MOVING_PWM); break;
-                case 2: pwm = (int16_t)fminf(fmaxf(output, -MOTOR2_MOVING_PWM), MOTOR2_MOVING_PWM); break;
-                case 3: pwm = (int16_t)fminf(fmaxf(output, -MOTOR3_MOVING_PWM), MOTOR3_MOVING_PWM); break;
-                case 4: pwm = (int16_t)fminf(fmaxf(output, -MOTOR4_MOVING_PWM), MOTOR4_MOVING_PWM); break;
+        // Set the velocity
+        if (!dxl_set_velocity(servo_controls[i].id, velocity)) {
+            ESP_LOGE(TAG, "Failed to set velocity for servo ID %d", servo_controls[i].id);
+        }
+        
+        servo_controls[i].current_velocity = velocity;
+        ESP_LOGI(TAG, "Servo %d: Set velocity to %" PRId32, servo_controls[i].id, velocity);
+        
+        // Update state based on error
+        if (fabsf(error) < 15) {  // Use fabsf for float comparison
+            if (servo_controls[i].state == DXL_STATE_MOVING) {
+                servo_controls[i].state = DXL_STATE_HOLDING;
+                ESP_LOGI(TAG, "Servo %d: Transitioned to HOLDING state", servo_controls[i].id);
             }
-        } else { // Holding state
-            switch (id) {
-                case 1: pwm = (int16_t)fminf(fmaxf(output, -MOTOR1_HOLDING_PWM), MOTOR1_HOLDING_PWM); break;
-                case 2: pwm = (int16_t)fminf(fmaxf(output, -MOTOR2_HOLDING_PWM), MOTOR2_HOLDING_PWM); break;
-                case 3: pwm = (int16_t)fminf(fmaxf(output, -MOTOR3_HOLDING_PWM), MOTOR3_HOLDING_PWM); break;
-                case 4: pwm = (int16_t)fminf(fmaxf(output, -MOTOR4_HOLDING_PWM), MOTOR4_HOLDING_PWM); break;
+        } else {
+            if (servo_controls[i].state == DXL_STATE_HOLDING) {
+                servo_controls[i].state = DXL_STATE_MOVING;
+                ESP_LOGI(TAG, "Servo %d: Transitioned to MOVING state", servo_controls[i].id);
             }
         }
-        
-        // Set PWM for the servo
-        if (!dxl_set_pwm(id, pwm)) {
-            ESP_LOGE(TAG, "Failed to set PWM for servo ID %d", id);
-        }
-        
-        ESP_LOGI(TAG, "Servo %d: Current=%ld, Target=%ld, Error=%.1f, PWM=%d", 
-                 id, current_pos, target_pos, error, pwm);
     }
 }
 
@@ -268,12 +251,12 @@ bool state_machine_get_position(uint8_t id, int32_t *position) {
     return true;
 }
 
-// Get current PWM of a servo
-bool state_machine_get_pwm(uint8_t id, int16_t *pwm) {
+// Get current velocity of a servo
+bool state_machine_get_velocity(uint8_t id, int32_t *velocity) {
     dxl_servo_control_t *control = find_servo_control(id);
-    if (!control || !pwm) return false;
+    if (!control || !velocity) return false;
     
-    *pwm = control->current_pwm;
+    *velocity = control->current_velocity;
     return true;
 }
 
@@ -282,12 +265,13 @@ void state_machine_emergency_stop(void) {
     for (int i = 0; i < found_count; i++) {
         dxl_servo_control_t *control = &servo_controls[i];
         control->state = DXL_STATE_IDLE;
-        control->current_pwm = 0;
-        dxl_set_pwm(control->id, 0);
+        control->current_velocity = 0;
+        dxl_set_velocity(control->id, 0);
     }
     ESP_LOGI(TAG, "Emergency stop activated");
 }
 
+// Update position control task
 void dxl_position_control_task(void *pvParameters)
 {
     ESP_LOGI(TAG, "Position control task started");
@@ -323,56 +307,34 @@ void dxl_position_control_task(void *pvParameters)
             ESP_LOGI(TAG, "Servo %d: Current=%" PRId32 ", Target=%" PRId32 ", Error=%" PRId32,
                     servo_controls[i].id, current_position, servo_controls[i].target_position, error);
             
-            // Get current positions of both motors 2 and 3
-            int32_t motor2_pos = servo_controls[1].current_position;  // Motor 2 is index 1
-            int32_t motor3_pos = servo_controls[2].current_position;  // Motor 3 is index 2
-            
-            // For motor 2, determine holding PWM based on both its position and motor 3's position
-            int32_t holding_pwm = servo_controls[i].max_holding_pwm;
-            if (servo_controls[i].id == 2) {
-                if (current_position > MOTOR2_FORWARD_THRESHOLD) {
-                    if (motor3_pos > MOTOR3_ELBOW_UP_THRESHOLD) {
-                        holding_pwm = MOTOR2_ELBOW_UP_HOLDING_PWM;  // Extra high holding when elbow is up
-                    } else {
-                        holding_pwm = MOTOR2_FORWARD_HOLDING_PWM;
-                    }
-                }
-            } else if (servo_controls[i].id == 3) {
-                if (current_position > MOTOR3_FORWARD_THRESHOLD) {
-                    holding_pwm = MOTOR3_FORWARD_HOLDING_PWM;
-                }
-            }
-            
             // Update PID controller
-            float pwm = update_pid(&pid_controllers[i], current_position);
-            ESP_LOGI(TAG, "Servo %d: PID output = %.2f", servo_controls[i].id, pwm);
+            float velocity = update_pid(&pid_controllers[i], current_position);
+            ESP_LOGI(TAG, "Servo %d: PID output = %.2f", servo_controls[i].id, velocity);
             
-            // Ensure PWM is in the correct direction based on error
-            if (error > 0) {
-                // Need to move in positive direction
-                pwm = fmaxf(pwm, 0);
-            } else {
-                // Need to move in negative direction
-                pwm = fminf(pwm, 0);
+            // Limit velocity based on motor parameters
+            int32_t limited_velocity;
+            switch (servo_controls[i].id) {
+                case 1: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR1_MAX_VELOCITY), -MOTOR1_MAX_VELOCITY); break;
+                case 2: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR2_MAX_VELOCITY), -MOTOR2_MAX_VELOCITY); break;
+                case 3: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR3_MAX_VELOCITY), -MOTOR3_MAX_VELOCITY); break;
+                case 4: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR4_MAX_VELOCITY), -MOTOR4_MAX_VELOCITY); break;
+                default: limited_velocity = 0; break;
             }
             
-            // Limit PWM based on state
-            int16_t limited_pwm;
-            if (servo_controls[i].state == DXL_STATE_MOVING) {
-                limited_pwm = (int16_t)fmaxf(fminf(pwm, servo_controls[i].max_moving_pwm), -servo_controls[i].max_moving_pwm);
-            } else {
-                limited_pwm = (int16_t)fmaxf(fminf(pwm, holding_pwm), -holding_pwm);
+            // Set velocity based on state
+            if (servo_controls[i].state == DXL_STATE_HOLDING) {
+                limited_velocity = 0;  // Stop when holding position
             }
             
-            // Send PWM command
-            if (!dxl_set_pwm(servo_controls[i].id, limited_pwm)) {
-                ESP_LOGW(TAG, "Failed to set PWM for servo %d", servo_controls[i].id);
+            // Send velocity command
+            if (!dxl_set_velocity(servo_controls[i].id, limited_velocity)) {
+                ESP_LOGW(TAG, "Failed to set velocity for servo %d", servo_controls[i].id);
                 continue;
             }
-            ESP_LOGI(TAG, "Servo %d: Set PWM to %d", servo_controls[i].id, limited_pwm);
+            ESP_LOGI(TAG, "Servo %d: Set velocity to %" PRId32, servo_controls[i].id, limited_velocity);
             
             // Update state based on error
-            if (abs(error) < 5) {
+            if (fabsf(error) < 15) {  // Use fabsf for float comparison
                 if (servo_controls[i].state == DXL_STATE_MOVING) {
                     servo_controls[i].state = DXL_STATE_HOLDING;
                     ESP_LOGI(TAG, "Servo %d: Transitioned to HOLDING state", servo_controls[i].id);

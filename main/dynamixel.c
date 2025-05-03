@@ -682,59 +682,35 @@ bool dxl_read_position(uint8_t id, int32_t *position)
     return false;
 }
 
-bool dxl_set_velocity(uint8_t id, uint32_t velocity)
+bool dxl_set_velocity(uint8_t id, int32_t velocity)
 {
     if (!dxl_initialized) {
         ESP_LOGE(TAG, "Dynamixel not initialized");
         return false;
     }
     
-    // First ensure we're in velocity control mode
-    if (!dxl_set_operating_mode(id, DXL_OPERATING_MODE_VELOCITY)) {
-        ESP_LOGE(TAG, "Failed to set velocity control mode for servo ID %d", id);
-        return false;
-    }
-    
-    // Ensure torque is enabled
-    if (!dxl_enable_torque(id)) {
-        ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
-        return false;
-    }
-    
-    // Limit velocity value to valid range
-    if (velocity > DXL_MAX_VELOCITY) velocity = DXL_MAX_VELOCITY;
+    // Limit velocity value to valid range (-265 to 265)
+    if (velocity > 265) velocity = 265;
+    if (velocity < -265) velocity = -265;
     
     ESP_LOGI(TAG, "Setting velocity for servo ID %d: %d", id, (int)velocity);
     
-    // First set the profile velocity (maximum speed limit)
-    uint8_t profile_params[4];
-    profile_params[0] = DXL_LOBYTE(DXL_ADDR_PROFILE_VELOCITY);
-    profile_params[1] = DXL_HIBYTE(DXL_ADDR_PROFILE_VELOCITY);
-    profile_params[2] = DXL_LOBYTE(DXL_MAX_VELOCITY);  // Set max profile velocity
-    profile_params[3] = DXL_HIBYTE(DXL_MAX_VELOCITY);
+    // Set the goal velocity (4 bytes in little-endian order)
+    uint8_t goal_params[6];
+    goal_params[0] = DXL_LOBYTE(DXL_ADDR_GOAL_VELOCITY);
+    goal_params[1] = DXL_HIBYTE(DXL_ADDR_GOAL_VELOCITY);
+    goal_params[2] = (velocity >> 0) & 0xFF;  // LSB
+    goal_params[3] = (velocity >> 8) & 0xFF;
+    goal_params[4] = (velocity >> 16) & 0xFF;
+    goal_params[5] = (velocity >> 24) & 0xFF;  // MSB
     
-    dxl_send_packet(id, DXL_INST_WRITE, profile_params, 4);
+    dxl_send_packet(id, DXL_INST_WRITE, goal_params, 6);
     
     uint8_t error = 0;
     uint8_t recv_params[16] = {0};
     uint16_t recv_length = 0;
     
     int result = dxl_read_status_packet(&error, recv_params, &recv_length);
-    if (result != DXL_COMM_SUCCESS || error != 0) {
-        ESP_LOGE(TAG, "Failed to set profile velocity for servo ID %d, error: 0x%02X", id, error);
-        return false;
-    }
-    
-    // Then set the goal velocity
-    uint8_t goal_params[4];
-    goal_params[0] = DXL_LOBYTE(DXL_ADDR_GOAL_VELOCITY);
-    goal_params[1] = DXL_HIBYTE(DXL_ADDR_GOAL_VELOCITY);
-    goal_params[2] = DXL_LOBYTE(velocity);
-    goal_params[3] = DXL_HIBYTE(velocity);
-    
-    dxl_send_packet(id, DXL_INST_WRITE, goal_params, 4);
-    
-    result = dxl_read_status_packet(&error, recv_params, &recv_length);
     
     if (result == DXL_COMM_SUCCESS && error == 0) {
         ESP_LOGI(TAG, "Velocity set for servo ID %d", id);

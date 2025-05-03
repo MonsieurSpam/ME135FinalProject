@@ -148,7 +148,7 @@ bool dxl_read_position(uint8_t id, int32_t *position);
  * @param velocity Velocity value (0-1023)
  * @return true if successful, false otherwise
  */
-bool dxl_set_velocity(uint8_t id, uint32_t velocity);
+bool dxl_set_velocity(uint8_t id, int32_t velocity);
 
 /**
  * @brief Set the acceleration profile of a Dynamixel servo

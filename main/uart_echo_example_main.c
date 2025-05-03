@@ -533,13 +533,6 @@ static void dxl_control_task(void *pvParameters)
             }
             vTaskDelay(pdMS_TO_TICKS(100));
             
-            // Set to PWM mode
-            if (!dxl_set_operating_mode(id, DXL_OPERATING_MODE_PWM)) {
-                ESP_LOGE(TAG, "Failed to set PWM mode for servo ID %d", id);
-                continue;
-            }
-            vTaskDelay(pdMS_TO_TICKS(100));
-            
             // Re-enable torque
             if (!dxl_enable_torque(id)) {
                 ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
@@ -554,39 +547,33 @@ static void dxl_control_task(void *pvParameters)
             
             // Set initial position target
             switch (id) {
-                case 1: control->target_position = 2048; break;  // Center position
-                case 2: control->target_position = 2000; break;  // Slightly forward
-                case 3: control->target_position = 2000; break;  // Slightly forward
-                case 4: control->target_position = 2000; break;  // Slightly forward
+                case 1: control->target_position = MOTOR1_CENTER_POSITION; break;  // Center position
+                case 2: control->target_position = MOTOR2_INITIAL_POSITION; break;  // Slightly forward
+                case 3: control->target_position = MOTOR3_INITIAL_POSITION; break;  // Slightly forward
+                case 4: control->target_position = MOTOR4_INITIAL_POSITION; break;  // Slightly forward
                 default: control->target_position = 2048; break;
             }
             
-            // Set PWM limits based on servo ID
+            // Initialize PID controller with velocity parameters
             switch (id) {
                 case 1: // Base rotation
-                    control->max_moving_pwm = MOTOR1_MOVING_PWM;
-                    control->max_holding_pwm = MOTOR1_HOLDING_PWM;
+                    init_pid_controller(&pid_controllers[i], MOTOR1_KP, MOTOR1_KI, MOTOR1_KD, MOTOR1_MAX_VELOCITY);
                     break;
                 case 2: // Shoulder
-                    control->max_moving_pwm = MOTOR2_MOVING_PWM;
-                    control->max_holding_pwm = MOTOR2_HOLDING_PWM;
+                    init_pid_controller(&pid_controllers[i], MOTOR2_KP, MOTOR2_KI, MOTOR2_KD, MOTOR2_MAX_VELOCITY);
                     break;
                 case 3: // Elbow
-                    control->max_moving_pwm = MOTOR3_MOVING_PWM;
-                    control->max_holding_pwm = MOTOR3_HOLDING_PWM;
+                    init_pid_controller(&pid_controllers[i], MOTOR3_KP, MOTOR3_KI, MOTOR3_KD, MOTOR3_MAX_VELOCITY);
                     break;
                 case 4: // Wrist
-                    control->max_moving_pwm = MOTOR4_MOVING_PWM;
-                    control->max_holding_pwm = MOTOR4_HOLDING_PWM;
+                    init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, MOTOR4_MAX_VELOCITY);
                     break;
             }
             
-            // Initialize PID controller
-            init_pid_controller(&pid_controllers[i], 0.2f, 0.01f, 0.005f, control->max_moving_pwm);
             pid_controllers[i].target = control->target_position;
             
-            ESP_LOGI(TAG, "Servo ID %d initialized with moving PWM %d and holding PWM %d",
-                     id, control->max_moving_pwm, control->max_holding_pwm);
+            ESP_LOGI(TAG, "Servo ID %d initialized with max velocity %d",
+                     id, (int)pid_controllers[i].max_current);
         }
         
         // Main control loop
