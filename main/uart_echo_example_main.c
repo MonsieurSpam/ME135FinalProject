@@ -377,18 +377,37 @@ void run_arm_demo(void) {
 
 // Process IK command
 static void process_ik_command(const char* cmd) {
-    float angles[4];  // Array to store joint angles
-    if (sscanf(cmd, "I%f,%f,%f,%f", 
-               &angles[0], &angles[1], &angles[2], &angles[3]) == 4) {
+    // Skip the 'I' prefix
+    cmd++;
+    
+    // Split the command into individual angle sets
+    char* angle_sets[20];  // Maximum 20 sets of angles
+    int num_sets = 0;
+    char* token = strtok((char*)cmd, ";");
+    
+    while (token != NULL && num_sets < 20) {
+        angle_sets[num_sets++] = token;
+        token = strtok(NULL, ";");
+    }
+    
+    if (num_sets == 0) {
+        printf("ERROR: No angle sets provided\n");
+        return;
+    }
+    
+    // Process each set of angles
+    for (int set_idx = 0; set_idx < num_sets; set_idx++) {
+        float angles[4];  // Array to store joint angles (only 4 joints)
+        int num_angles = sscanf(angle_sets[set_idx], "%f,%f,%f,%f",
+                              &angles[0], &angles[1], &angles[2], &angles[3]);
+        
+        if (num_angles != 4) {  // We need exactly 4 angles
+            printf("ERROR: Invalid angle set format. Expected 4 angles\n");
+            continue;
+        }
+        
         printf("Moving to joint angles: %.2f,%.2f,%.2f,%.2f\n", 
                angles[0], angles[1], angles[2], angles[3]);
-        
-        // First move to home position
-        printf("Moving to home position first...\n");
-        process_center_command();
-        
-        // Wait for servos to reach home position
-        vTaskDelay(pdMS_TO_TICKS(2000));
         
         // Convert angles to positions and move servos
         int positions[4];
@@ -406,8 +425,9 @@ static void process_ik_command(const char* cmd) {
             process_servo_command(servo_cmd);
             printf("Joint %d: angle=%.2f° -> position=%d\n", i+1, angles[i], positions[i]);
         }
-    } else {
-        printf("ERROR: Invalid IK command format. Use: Iangle1,angle2,angle3,angle4\n");
+        
+        // Wait for servos to reach position
+        vTaskDelay(pdMS_TO_TICKS(1000));  // 1 second delay between sets
     }
 }
 
