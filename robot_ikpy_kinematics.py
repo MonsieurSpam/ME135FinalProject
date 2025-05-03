@@ -19,99 +19,128 @@ from ikpy.link import OriginLink, URDFLink
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-# Modify these values with your actual measurements (in meters)
-BASE_HEIGHT = 0.04  # Base to joint 1 (Z axis) - 4 cm
-LINK_1_2_LENGTH = 0.02  # Joint 1 to joint 2 - 2 cm
-LINK_2_3_LENGTH = 0.12  # Joint 2 to joint 3 - 12 cm
-LINK_3_4_LENGTH = 0.14  # Joint 3 to joint 4 - 14 cm
-LINK_4_5_LENGTH = 0.04  # Joint 4 to joint 5 - 4 cm
-LINK_5_6_LENGTH = 0.01  # Joint 5 to joint 6 - 1 cm
-END_EFFECTOR_LENGTH = 0.05  # Joint 6 to end-effector - 5 cm
+# Robot‑arm geometry — update with your real measurements  (all in metres)
+BASE_HEIGHT        = 0.04   # Base to joint‑1 axis  (Z)
+LINK_1_2_LENGTH    = 0.02   # Joint‑1 → joint‑2  offset
+LINK_2_3_LENGTH    = 0.15   # Joint‑2 → joint‑3  (upper arm length)
+LINK_3_4_LENGTH    = 0.15   # Joint‑3 → joint‑4  (fore‑arm length)
+LINK_4_5_LENGTH    = 0.05   # Joint‑4 → joint‑5  (wrist yaw → wrist pitch)
+LINK_5_6_LENGTH    = 0.00   # Joint‑5 → gripper pivot (inside shell) – no offset
+END_EFFECTOR_LENGTH = 0.05  # Gripper pivot → TCP (camera lens / finger tips)
 
-# Custom joint limits for Dynamixel servo motors
-# Format: [min_position, max_position, min_angle_degrees, max_angle_degrees]
-JOINT_1_LIMITS = [1027, 3096, 90, 270]    # Joint 1 (base) - 90° to 270°
-JOINT_2_LIMITS = [140, 2806, 140, 270]    # Joint 2 (shoulder) - 140° to 270°
-JOINT_3_LIMITS = [1024, 3000, 180, 270]   # Joint 3 (elbow) - 180° is straight, 270° is curled down
-JOINT_4_LIMITS = [1523, 2476, 90, 270]    # Joint 4 (wrist) - 90° is up, 180° is straight, 270° is down
-JOINT_5_LIMITS = [1830, 2200, 0, 45]      # Joint 5 (wrist pitch) - 0° to 45°
-JOINT_6_LIMITS = [2000, 2634, 0, 90]      # Joint 6 (gripper) - 0° to 90°
+# Custom Dynamixel limits  [min_pos, max_pos, min_deg, max_deg]
+JOINT_1_LIMITS = [1027, 3096,  90, 270]   # base yaw
+JOINT_2_LIMITS = [ 140, 2806, 140, 270]   # shoulder pitch
+JOINT_3_LIMITS = [1024, 3000, 180, 270]   # elbow pitch
+JOINT_4_LIMITS = [1523, 2476,  90, 270]   # wrist yaw (roll)
+JOINT_5_LIMITS = [1830, 2200,   0,  45]   # wrist pitch
+JOINT_6_LIMITS = [2000, 2634,   0,  90]   # gripper (NOT part of IK)
+
+from math import pi
+import ikpy
+from ikpy.chain import Chain
+from ikpy.link  import URDFLink, OriginLink
 
 class RobotArmIKPy:
     def __init__(self):
-        # Create a kinematic chain for the robot arm using IKPy
-        self.chain = ikpy.chain.Chain(
+        # ------------------ build kinematic chain ------------------
+        # Joint‑6 (gripper) is kept as a *fixed* link (rotation=None)
+        # so IKPy solves only the 5 positioning joints.
+        self.chain = Chain(
             name="robot_arm",
             links=[
-                OriginLink(),  # Base link
+                OriginLink(),  # World / base frame
                 URDFLink(
-                    name="joint1",
+                    name="joint1",                                  # base yaw (Z)
                     origin_translation=[0, 0, BASE_HEIGHT],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 1]  # Base rotation around Z
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 0, 1],
+                    bounds=(-pi/2, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint2",
+                    name="joint2",                                  # shoulder pitch (Y)
                     origin_translation=[0, 0, LINK_1_2_LENGTH],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 1, 0]  # Shoulder pitch around Y
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(-pi/2, 0)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint3",
+                    name="joint3",                                  # elbow pitch (Y)
                     origin_translation=[LINK_2_3_LENGTH, 0, 0],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 1, 0]  # Elbow pitch around Y
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(0, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint4",
+                    name="joint4",                                  # wrist yaw / roll (Z)
                     origin_translation=[LINK_3_4_LENGTH, 0, 0],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 1]  # Wrist rotation around Z
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 0, 1],
+                    bounds=(0, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint5",
+                    name="joint5",                                  # wrist pitch (Y)
                     origin_translation=[0, 0, LINK_4_5_LENGTH],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 1, 0]  # Wrist pitch around Y
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(-pi/4, pi/4)  # Add joint limits
                 ),
-                URDFLink(
+                URDFLink(                                           # gripper pivot – NO DoF
                     name="joint6",
                     origin_translation=[0, 0, LINK_5_6_LENGTH],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 1]  # Gripper rotation around Z
+                    use_symbolic_matrix=True,
+                    joint_type="fixed",
+                    rotation=None,            # <- fixed link, removed from IK DoF
+                    translation=None
                 ),
-                URDFLink(
+                URDFLink(                                           # TCP
                     name="end_effector",
                     origin_translation=[0, 0, END_EFFECTOR_LENGTH],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 0]  # Fixed link (no rotation)
+                    use_symbolic_matrix=True,
+                    joint_type="fixed",
+                    rotation=None,       # fixed link
+                    translation=None
                 )
             ]
         )
-        
-        # Convert Dynamixel limits to IKPy limits
-        # For each joint, we need to convert from Dynamixel range to IKPy range
+
+        # ------------------ IKPy joint‑angle limits -----------------
+        # Angles are expressed in *radians* and centred around the
+        # mechanical zero you defined above.
         self.joint_limits = [
-            [-pi/2, pi/2],     # Joint 1: [-90°, 90°] (matches Dynamixel 90° to 270°)
-            [-pi/2, pi/2],     # Joint 2: [-90°, 90°] (matches Dynamixel 140° to 270°)
-            [0, pi],           # Joint 3: [0°, 180°] (matches Dynamixel 180° to 270°)
-            [-pi/2, pi/2],     # Joint 4: [-90°, 90°] (matches Dynamixel 90° to 270°)
-            [-pi/4, pi/4],     # Joint 5: [-45°, 45°] (matches Dynamixel 0° to 90°)
-            [-pi/2, pi/2]      # Joint 6: [-90°, 90°] (matches Dynamixel 0° to 180°)
+            [-pi/2,  pi/2],    # J1:  90° → 270°
+            [-pi/2,     0],    # J2: 140° → 270°
+            [    0,  pi/2],    # J3: 180° → 270°
+            [    0,  pi/2],    # J4:  90° → 180°
+            [-pi/4, pi/4],     # J5:   0° →  45°
+            [-pi/2, pi/2]      # J6 (gripper) – kept for completeness, not used by IK
         ]
-        
-        # Save the dynamixel position limits and angle ranges for conversion
+
+        # Save Dynamixel ranges for later degree/step conversion
         self.joint_dxl_limits = [
             JOINT_1_LIMITS,
-            JOINT_2_LIMITS, 
+            JOINT_2_LIMITS,
             JOINT_3_LIMITS,
             JOINT_4_LIMITS,
             JOINT_5_LIMITS,
             JOINT_6_LIMITS
         ]
-        
-        # Center position (2048 in standard Dynamixel units)
+
+        # Dynamixel "center" (depends on model firmware; 2048 for XL‑series at 12‑bit)
         self.center_position = 2048
+
         
     def forward_kinematics(self, joint_angles):
         """Calculate the end-effector position given joint angles."""
@@ -248,15 +277,17 @@ class RobotArmIKPy:
                 # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
                 angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
             elif i == 1:  # Shoulder
-                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
-                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
-                angle_deg = max(140, angle_deg)
+                # IKPy: -90° to 90° -> Dynamixel: 140° to 270°
+                # Negative IKPy angle means bending backward
+                angle_deg = 270 + angle_deg  # Shift to match Dynamixel range
             elif i == 2:  # Elbow
-                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
-                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
+                # IKPy: -90° to 90° -> Dynamixel: 180° to 270°
+                # Negative IKPy angle means bending backward
+                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
             elif i == 3:  # Wrist rotation
-                # Fixed joint, always at 180° in Dynamixel
-                angle_deg = 180
+                # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
+                # 0° in IKPy should be 90° in Dynamixel (pointing up)
+                angle_deg = 90 + angle_deg  # Shift to match Dynamixel range
             elif i == 4:  # Wrist pitch
                 # IKPy: -45° to 45° -> Dynamixel: 0° to 45°
                 angle_deg = angle_deg  # Already in correct range
@@ -517,46 +548,9 @@ def main():
                     
                     # Connect to ESP32
                     if interface.connect():
-                        # Convert to Dynamixel angles in degrees
-                        angles_deg = []
-                        for i, angle in enumerate(joint_angles):
-                            # Get the limits for this joint
-                            min_pos, max_pos, min_deg, max_deg = robot.joint_dxl_limits[i]
-                            
-                            # Convert angle to degrees
-                            angle_deg = degrees(angle)
-                            
-                            # Transform angles to match Dynamixel coordinate system
-                            if i == 0:  # Base
-                                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
-                            elif i == 1:  # Shoulder
-                                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
-                                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
-                                angle_deg = max(140, angle_deg)
-                            elif i == 2:  # Elbow
-                                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
-                                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
-                            elif i == 3:  # Wrist rotation
-                                # Fixed joint, always at 180° in Dynamixel
-                                angle_deg = 180
-                            elif i == 4:  # Wrist pitch
-                                angle_deg = angle_deg  # Already in correct range
-                            elif i == 5:  # Gripper
-                                angle_deg = angle_deg  # Already in correct range
-                            
-                            # Ensure angle is within 0-360° range
-                            if angle_deg < 0:
-                                angle_deg += 360
-                            elif angle_deg >= 360:
-                                angle_deg -= 360
-                            
-                            angles_deg.append(angle_deg)
-                        
-                        # Send the Dynamixel angles
-                        command = "I" + ",".join([f"{angle:.2f}" for angle in angles_deg])
-                        print(f"\nSending command to ESP32: {command}")
-                        success = interface.send_command(command)
-                        print(f"Sending angles to ESP32: {'Success' if success else 'Failed'}")
+                        # Set the servo positions
+                        success = interface.set_all_servo_positions(positions)
+                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
                         
                         # Disconnect from ESP32
                         interface.disconnect()
@@ -690,46 +684,9 @@ def main():
                     
                     # Connect to ESP32
                     if interface.connect():
-                        # Convert to Dynamixel angles in degrees
-                        angles_deg = []
-                        for i, angle in enumerate(joint_angles):
-                            # Get the limits for this joint
-                            min_pos, max_pos, min_deg, max_deg = robot.joint_dxl_limits[i]
-                            
-                            # Convert angle to degrees
-                            angle_deg = degrees(angle)
-                            
-                            # Transform angles to match Dynamixel coordinate system
-                            if i == 0:  # Base
-                                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
-                            elif i == 1:  # Shoulder
-                                # IKPy: -90° (up) to 90° (down) -> Dynamixel: 140° to 270°
-                                angle_deg = 180 + angle_deg  # Map -90° to 90° to 90° to 270°
-                                angle_deg = max(140, angle_deg)
-                            elif i == 2:  # Elbow
-                                # IKPy: 0° (straight) to 180° (curled down) -> Dynamixel: 180° to 270°
-                                angle_deg = 180 + (angle_deg * 0.5)  # Map 0° to 180° to 180° to 270°
-                            elif i == 3:  # Wrist rotation
-                                # Fixed joint, always at 180° in Dynamixel
-                                angle_deg = 180
-                            elif i == 4:  # Wrist pitch
-                                angle_deg = angle_deg  # Already in correct range
-                            elif i == 5:  # Gripper
-                                angle_deg = angle_deg  # Already in correct range
-                            
-                            # Ensure angle is within 0-360° range
-                            if angle_deg < 0:
-                                angle_deg += 360
-                            elif angle_deg >= 360:
-                                angle_deg -= 360
-                            
-                            angles_deg.append(angle_deg)
-                        
-                        # Send the Dynamixel angles
-                        command = "I" + ",".join([f"{angle:.2f}" for angle in angles_deg])
-                        print(f"\nSending command to ESP32: {command}")
-                        success = interface.send_command(command)
-                        print(f"Sending angles to ESP32: {'Success' if success else 'Failed'}")
+                        # Set the servo positions
+                        success = interface.set_all_servo_positions(dynamixel_positions)
+                        print(f"Sending positions to ESP32: {'Success' if success else 'Failed'}")
                         
                         # Disconnect from ESP32
                         interface.disconnect()

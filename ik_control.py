@@ -8,6 +8,7 @@ import glob
 import numpy as np
 import argparse
 from robot_ikpy_kinematics import RobotArmIKPy
+from math import degrees
 
 def find_esp32_port():
     """Find the ESP32 port by looking for common port patterns"""
@@ -62,33 +63,31 @@ class RobotController:
             print("Error: Could not find valid IK solution")
             return
         
-        # Convert IKPy angles to Dynamixel angles
+        # Convert IKPy angles to Dynamixel positions for visualization
         dynamixel_positions = self.ik_solver.angles_to_dynamixel(joint_angles)
         
         if not visualize_only:
-            # Convert IKPy angles to degrees for sending to ESP32
-            joint_angles_deg = np.degrees(joint_angles)
-            
-            # Transform angles to match Dynamixel coordinate system
+            # Convert joint angles to degrees for the I command
             angles_deg = []
-            for i, angle in enumerate(joint_angles_deg):
+            for i, angle in enumerate(joint_angles):
+                # Convert from IKPy coordinate system to Dynamixel coordinate system
                 if i == 0:  # Base
-                    angle_deg = 180 + angle  # Shift to match Dynamixel range
+                    angle_deg = 180 + degrees(angle)  # Shift to match Dynamixel range
                 elif i == 1:  # Shoulder
-                    angle_deg = 270 + angle  # Shift to match Dynamixel range
+                    angle_deg = 270 + degrees(angle)  # Shift to match Dynamixel range
                 elif i == 2:  # Elbow
-                    angle_deg = 90 + angle  # Shift to match Dynamixel range (90° is straight)
+                    angle_deg = 90 + degrees(angle)  # Shift to match Dynamixel range (90° is straight)
                 elif i == 3:  # Wrist rotation
-                    angle_deg = 90 + angle  # Shift to match Dynamixel range
+                    angle_deg = 90 + degrees(angle)  # Shift to match Dynamixel range
                 elif i == 4:  # Wrist pitch
-                    angle_deg = angle  # Already in correct range
+                    angle_deg = degrees(angle)  # Already in correct range
                 elif i == 5:  # Gripper
-                    angle_deg = angle  # Already in correct range
+                    angle_deg = degrees(angle)  # Already in correct range
                 
                 # Ensure angle is within 0-360° range
-                if angle_deg < 0:
+                while angle_deg < 0:
                     angle_deg += 360
-                elif angle_deg >= 360:
+                while angle_deg >= 360:
                     angle_deg -= 360
                 
                 angles_deg.append(angle_deg)
