@@ -47,42 +47,45 @@ void init_pid_controller(pid_controller_t* pid, float kp, float ki, float kd, fl
     pid->integral_limit = max_current / ki; // Limit integral term to prevent windup
 }
 
-// Update PID controller and return control output
-float update_pid(pid_controller_t* pid, float current_position) {
-    // Calculate error (target - current)
-    float error = pid->target - current_position;
-    
-    // Apply deadband
-    if (fabsf(error) < DEADBAND_THRESHOLD) {
-        return 0.0f;
-    }
-    
-    // Calculate proportional term
+// PID controller with anti-windup
+static float pid_controller(pid_controller_t *pid, float error)
+{
+    // Proportional term
     float p_term = pid->kp * error;
     
-    // Update integral term with anti-windup
-    float i_term = pid->ki * pid->integral;
-    if (fabsf(i_term) < pid->integral_limit) {
-        pid->integral += error;
-    } else {
-        pid->integral = 0.0f;
+    // Integral term with anti-windup
+    pid->integral += error;
+    
+    // Limit integral term to prevent windup
+    float max_integral = 100.0f; // Adjust this value based on your needs
+    if (pid->integral > max_integral) {
+        pid->integral = max_integral;
+    } else if (pid->integral < -max_integral) {
+        pid->integral = -max_integral;
     }
     
-    // Calculate derivative term
+    // Reset integral if error changes sign (prevents windup during direction changes)
+    if (error * pid->prev_error < 0) {
+        pid->integral = 0;
+    }
+    
+    float i_term = pid->ki * pid->integral;
+    
+    // Derivative term
     float d_term = pid->kd * (error - pid->prev_error);
     pid->prev_error = error;
     
-    // Calculate total output (velocity)
-    float velocity = p_term + i_term + d_term;
+    // Calculate total output
+    float output = p_term + i_term + d_term;
     
-    // Limit velocity
-    if (velocity > 0) {
-        velocity = fminf(velocity, MAX_VELOCITY);
-    } else {
-        velocity = fmaxf(velocity, MIN_VELOCITY);
+    // Limit output to maximum velocity
+    if (output > MAX_VELOCITY) {
+        output = MAX_VELOCITY;
+    } else if (output < MIN_VELOCITY) {
+        output = MIN_VELOCITY;
     }
     
-    return velocity;
+    return output;
 }
 
 // Helper function to find servo control by ID
@@ -175,7 +178,7 @@ void state_machine_update(void) {
         float error = target_pos - current_pos;
         
         // Calculate PID output
-        float pid_output = update_pid(&pid_controllers[i], current_pos);
+        float pid_output = pid_controller(&pid_controllers[i], error);
         
         // Convert PID output to velocity
         int32_t velocity = (int32_t)pid_output;
@@ -308,7 +311,7 @@ void dxl_position_control_task(void *pvParameters)
                     servo_controls[i].id, current_position, servo_controls[i].target_position, error);
             
             // Update PID controller
-            float velocity = update_pid(&pid_controllers[i], current_position);
+            float velocity = pid_controller(&pid_controllers[i], error);
             ESP_LOGI(TAG, "Servo %d: PID output = %.2f", servo_controls[i].id, velocity);
             
             // Limit velocity based on motor parameters
