@@ -20,4 +20,4 @@ python final_detection_realtime.py
 
 - change `cap = cv2.VideoCapture(0)` if it's not using the right camera
 - change `detected_color` to choose different colors
-- change `vis` to turn off the real-time visualization of the detected output
+- change `visualize` to turn off the real-time visualization of the detected output
