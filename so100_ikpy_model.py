@@ -39,27 +39,25 @@ class SO100Arm:
                 ),
                 URDFLink(
                     name="elbow",  # Joint 3 - Elbow
-                    origin_translation=[0.1, 0, 0],  # Upper arm length (reduced from 0.12)
+                    origin_translation=[0.14, 0, 0],  # Upper arm length (reduced from 0.12)
                     origin_orientation=[0, 0, 0],
                     rotation=[0, 1, 0],  # Y-axis rotation
                     joint_type="revolute",
-                    bounds=(0, pi)  # 0 to 180 degrees
+                    bounds=(0, 3*pi/2)  # 0 to 180 degrees
                 ),
                 URDFLink(
                     name="wrist_pitch",  # Joint 4 - Wrist pitch
-                    origin_translation=[0.1, 0, 0],  # Forearm length (reduced from 0.14)
+                    origin_translation=[0.14, 0, 0],  # Forearm length (reduced from 0.14)
                     origin_orientation=[0, 0, 0],
                     rotation=[0, 1, 0],  # Y-axis rotation
                     joint_type="revolute",
-                    bounds=(0, pi)  # 0 to 180 degrees
+                    bounds=(0, 3*pi/2)  # 0 to 180 degrees
                 ),
                 URDFLink(
                     name="wrist_roll",  # Joint 5 - Wrist roll (orientation only)
-                    origin_translation=[0, 0, 0],  # No translation
+                    origin_translation=[0, 0, 0.05],  # No translation
                     origin_orientation=[0, 0, 0],
-                    rotation=[1, 0, 0],  # X-axis rotation
-                    joint_type="revolute",
-                    bounds=(-pi/2, pi/2)  # ±90 degrees
+                    joint_type="fixed",
                 ),
                 URDFLink(
                     name="gripper",  # Fixed link for gripper
@@ -92,7 +90,7 @@ class SO100Arm:
             return np.array([0, 0, 0]), np.eye(3), np.eye(4)
 
     def inverse_kinematics(self, target_position, target_orientation=None, initial_position=None, max_retries=10):
-        """Calculate joint angles to reach the target position with error < 0.01m."""
+        """Calculate joint angles to reach the target position with error < 0.005m."""
         if initial_position is None:
             initial_position = [0, 0, 0, 0, 0]
         
@@ -111,50 +109,59 @@ class SO100Arm:
                 initial_full = initial_full[:len(self.chain.links)]
             
             try:
-                if target_orientation is not None:
-                    # Create the full 4x4 transformation matrix
-                    target_matrix = np.eye(4)
-                    target_matrix[0:3, 0:3] = target_orientation
-                    target_matrix[0:3, 3] = target_position
-                    # With orientation constraint
-                    joint_angles = self.chain.inverse_kinematics(
-                        target_matrix,
-                        initial_position=initial_full,
-                        orientation_mode="all"
-                    )
-                else:
-                    # Position only - ignore wrist roll for position-only IK
-                    # First solve for position with wrist roll at 0
-                    initial_full[5] = 0  # Set wrist roll to 0
-                    joint_angles = self.chain.inverse_kinematics(
-                        target_position,
-                        initial_position=initial_full,
-                        orientation_mode=None
-                    )
-                    # Keep the wrist roll at 0 since it doesn't affect position
-                    joint_angles[4] = 0
+                # First solve for position only
+                joint_angles = self.chain.inverse_kinematics(
+                    target_position,
+                    initial_position=initial_full,
+                    orientation_mode=None
+                )
+                
+                # Keep the wrist roll at 0 since it only affects orientation
+                joint_angles[4] = 0
+                
+                # Now adjust the wrist pitch to point downward
+                # Get current end effector position and orientation
+                achieved_position, achieved_rotation, _ = self.forward_kinematics(joint_angles[1:6])
+                
+                # Calculate the angle needed to point downward
+                # Current Z axis of the end effector
+                current_z = achieved_rotation[:, 2]
+                # Desired Z axis (downward)
+                desired_z = np.array([0, 0, -1])
+                
+                # Calculate angle between current and desired Z axes
+                angle = np.arccos(np.clip(np.dot(current_z, desired_z), -1.0, 1.0))
+                
+                # Adjust wrist pitch to point downward
+                joint_angles[4] = angle
                 
                 # Verify the solution
-                achieved_position, _, _ = self.forward_kinematics(joint_angles[1:6])
-                error = np.linalg.norm(np.array(target_position) - achieved_position)
+                achieved_position, achieved_rotation, _ = self.forward_kinematics(joint_angles[1:6])
+                pos_error = np.linalg.norm(np.array(target_position) - achieved_position)
+                
+                # Calculate orientation error (dot product between desired and achieved Z axes)
+                achieved_z = achieved_rotation[:, 2]
+                orient_error = abs(np.dot(desired_z, achieved_z) + 1)  # Should be close to 0
+                
+                # Combined error (weighted sum of position and orientation errors)
+                error = pos_error + 0.1 * orient_error
                 
                 if error < best_error:
                     best_error = error
                     best_angles = joint_angles[1:6]
-                    print(f"New best solution found with error: {error:.3f}m")
+                    print(f"New best solution found with position error: {pos_error:.3f}m, orientation error: {orient_error:.3f}")
                 
                 # If we found a good solution, return it
-                if error < 0.01:  # 1 cm tolerance
+                if pos_error < 0.001 and orient_error < 0.1:  # 5mm position tolerance, ~5 degree orientation tolerance
                     return joint_angles[1:6]
                 
                 # Try a different initial position for next attempt
-                # Use joint-specific bounds for random initialization
                 initial_position = [
                     np.random.uniform(-pi/2, pi/2),  # base_rotation
                     np.random.uniform(-pi/2, pi/4),  # shoulder
                     np.random.uniform(0, pi),        # elbow
                     np.random.uniform(0, pi),        # wrist_pitch
-                    0                               # wrist_roll (kept at 0)
+                    0                               # wrist_roll
                 ]
                 
             except Exception as e:
@@ -162,7 +169,7 @@ class SO100Arm:
                 continue
         
         if best_error < float('inf'):
-            print(f"Warning: Best solution found has error of {best_error:.3f}m")
+            print(f"Warning: Best solution found has error of {best_error:.3f}")
             return best_angles
         else:
             print("Error: Could not find a solution within tolerance")
@@ -244,9 +251,10 @@ def main():
     print(f"Rotation:\n{rotation}")
     
     # Test a single target position
-    target_position = [0.15, 0.15, 0.0]  # Low and directly in front
+    target_position = [0.1, 0.1, 0.001]  # Low and directly in front
     
     print(f"\nTesting Target Position: {target_position}")
+    print("Attempting to reach position with gripper pointing downward...")
     
     # Calculate inverse kinematics 
     joint_angles = arm.inverse_kinematics(target_position)
@@ -254,10 +262,11 @@ def main():
     print(f"Joint Angles (degrees): {np.degrees(joint_angles)}")
     
     # Verify the solution
-    achieved_position, _, _ = arm.forward_kinematics(joint_angles)
+    achieved_position, achieved_rotation, _ = arm.forward_kinematics(joint_angles)
     print(f"Achieved Position: {achieved_position}")
-    error = np.linalg.norm(np.array(target_position) - achieved_position)
-    print(f"Position Error (meters): {error:.6f}")
+    print(f"Achieved Rotation:\n{achieved_rotation}")
+    pos_error = np.linalg.norm(np.array(target_position) - achieved_position)
+    print(f"Position Error (meters): {pos_error:.6f}")
     
     # Visualize the solution
     fig, ax = arm.visualize(joint_angles, target_position)
