@@ -108,7 +108,7 @@ class SO100IKControl:
 
 def main():
     # Example usage
-    target_position = [0.15, 0.15, 0.0]  # Target position in meters
+    target_position = [0.12, -0.09, 0.1]  # Target position in meters
     target_orientation = np.array([[0, 0, 1],
                                  [0, 1, 0],
                                  [-1, 0, 0]])  # Gripper pointing downward

@@ -251,7 +251,7 @@ def main():
     print(f"Rotation:\n{rotation}")
     
     # Test a single target position
-    target_position = [0.1, 0.1, 0.001]  # Low and directly in front
+    target_position = [0.1, 0.1, 0.01]  # Low and directly in front
     
     print(f"\nTesting Target Position: {target_position}")
     print("Attempting to reach position with gripper pointing downward...")
