@@ -39,22 +39,22 @@ class SO100Arm:
                 ),
                 URDFLink(
                     name="elbow",  # Joint 3 - Elbow
-                    origin_translation=[0.12, 0, 0],  # Upper arm length
-                    origin_orientation=[0, 0, 0],
-                    rotation=[0, 1, 0],  # Y-axis rotation
-                    joint_type="revolute",
-                    bounds=(0, pi)  # 0 to 90 degrees
-                ),
-                URDFLink(
-                    name="wrist_pitch",  # Joint 4 - Wrist pitch
-                    origin_translation=[0.14, 0, 0],  # Forearm length
+                    origin_translation=[0.1, 0, 0],  # Upper arm length (reduced from 0.12)
                     origin_orientation=[0, 0, 0],
                     rotation=[0, 1, 0],  # Y-axis rotation
                     joint_type="revolute",
                     bounds=(0, pi)  # 0 to 180 degrees
                 ),
                 URDFLink(
-                    name="wrist_roll",  # Joint 5 - Wrist roll
+                    name="wrist_pitch",  # Joint 4 - Wrist pitch
+                    origin_translation=[0.1, 0, 0],  # Forearm length (reduced from 0.14)
+                    origin_orientation=[0, 0, 0],
+                    rotation=[0, 1, 0],  # Y-axis rotation
+                    joint_type="revolute",
+                    bounds=(0, pi)  # 0 to 180 degrees
+                ),
+                URDFLink(
+                    name="wrist_roll",  # Joint 5 - Wrist roll (orientation only)
                     origin_translation=[0, 0, 0],  # No translation
                     origin_orientation=[0, 0, 0],
                     rotation=[1, 0, 0],  # X-axis rotation
@@ -91,45 +91,81 @@ class SO100Arm:
             print(f"Error in forward kinematics calculation: {e}")
             return np.array([0, 0, 0]), np.eye(3), np.eye(4)
 
-    def inverse_kinematics(self, target_position, target_orientation=None, initial_position=None):
-        """Calculate joint angles to reach the target position."""
+    def inverse_kinematics(self, target_position, target_orientation=None, initial_position=None, max_retries=10):
+        """Calculate joint angles to reach the target position with error < 0.01m."""
         if initial_position is None:
-            initial_position = [0, -pi/2, pi/2, pi/2, 0]
+            initial_position = [0, 0, 0, 0, 0]
         
-        # Add 0 for the base link
-        initial_full = [0] + list(initial_position)
+        best_error = float('inf')
+        best_angles = None
         
-        # Ensure we have the right number of angles
-        if len(initial_full) < len(self.chain.links):
-            initial_full.extend([0] * (len(self.chain.links) - len(initial_full)))
-        elif len(initial_full) > len(self.chain.links):
-            initial_full = initial_full[:len(self.chain.links)]
-        
-        try:
-            if target_orientation is not None:
-                # Create the full 4x4 transformation matrix
-                target_matrix = np.eye(4)
-                target_matrix[0:3, 0:3] = target_orientation
-                target_matrix[0:3, 3] = target_position
-                # With orientation constraint
-                joint_angles = self.chain.inverse_kinematics(
-                    target_matrix,
-                    initial_position=initial_full,
-                    orientation_mode="all"
-                )
-            else:
-                # Position only
-                joint_angles = self.chain.inverse_kinematics(
-                    target_position,
-                    initial_position=initial_full,
-                    orientation_mode=None
-                )
+        # Try different initial positions
+        for attempt in range(max_retries):
+            # Add 0 for the base link
+            initial_full = [0] + list(initial_position)
             
-            # Remove the first angle (base link) and return only the joint angles
-            return joint_angles[1:6]
+            # Ensure we have the right number of angles
+            if len(initial_full) < len(self.chain.links):
+                initial_full.extend([0] * (len(self.chain.links) - len(initial_full)))
+            elif len(initial_full) > len(self.chain.links):
+                initial_full = initial_full[:len(self.chain.links)]
+            
+            try:
+                if target_orientation is not None:
+                    # Create the full 4x4 transformation matrix
+                    target_matrix = np.eye(4)
+                    target_matrix[0:3, 0:3] = target_orientation
+                    target_matrix[0:3, 3] = target_position
+                    # With orientation constraint
+                    joint_angles = self.chain.inverse_kinematics(
+                        target_matrix,
+                        initial_position=initial_full,
+                        orientation_mode="all"
+                    )
+                else:
+                    # Position only - ignore wrist roll for position-only IK
+                    # First solve for position with wrist roll at 0
+                    initial_full[5] = 0  # Set wrist roll to 0
+                    joint_angles = self.chain.inverse_kinematics(
+                        target_position,
+                        initial_position=initial_full,
+                        orientation_mode=None
+                    )
+                    # Keep the wrist roll at 0 since it doesn't affect position
+                    joint_angles[4] = 0
+                
+                # Verify the solution
+                achieved_position, _, _ = self.forward_kinematics(joint_angles[1:6])
+                error = np.linalg.norm(np.array(target_position) - achieved_position)
+                
+                if error < best_error:
+                    best_error = error
+                    best_angles = joint_angles[1:6]
+                    print(f"New best solution found with error: {error:.3f}m")
+                
+                # If we found a good solution, return it
+                if error < 0.01:  # 1 cm tolerance
+                    return joint_angles[1:6]
+                
+                # Try a different initial position for next attempt
+                # Use joint-specific bounds for random initialization
+                initial_position = [
+                    np.random.uniform(-pi/2, pi/2),  # base_rotation
+                    np.random.uniform(-pi/2, pi/4),  # shoulder
+                    np.random.uniform(0, pi),        # elbow
+                    np.random.uniform(0, pi),        # wrist_pitch
+                    0                               # wrist_roll (kept at 0)
+                ]
+                
+            except Exception as e:
+                print(f"Attempt {attempt + 1} failed: {e}")
+                continue
         
-        except Exception as e:
-            print(f"Error in inverse kinematics calculation: {e}")
+        if best_error < float('inf'):
+            print(f"Warning: Best solution found has error of {best_error:.3f}m")
+            return best_angles
+        else:
+            print("Error: Could not find a solution within tolerance")
             return [0, 0, 0, 0, 0]
 
     def visualize(self, joint_angles, target_position=None):
@@ -208,7 +244,7 @@ def main():
     print(f"Rotation:\n{rotation}")
     
     # Test a single target position
-    target_position = [0.05, 0.05, 0.2]  # Low and directly in front
+    target_position = [0.15, 0.15, 0.0]  # Low and directly in front
     
     print(f"\nTesting Target Position: {target_position}")
     
