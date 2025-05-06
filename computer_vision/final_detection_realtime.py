@@ -16,7 +16,7 @@ CONFIG = {
     ]),
     'translation_vector': np.array([0.21, 0, 0.215]),  # Update with actual values if needed
     'visualize': True,
-    'detected_color': 'blue',  # 'red' or 'blue'
+    'detected_color': 'red',  # 'red' or 'blue'
 }
 
 COLOR_RANGES = {
