@@ -1,6 +1,6 @@
 import cv2
 import numpy as np
-
+import time
 # ==== CONFIGURATION ====
 CONFIG = {
     'fx': 347.79486758,
@@ -16,7 +16,8 @@ CONFIG = {
     ]),
     'translation_vector': np.array([0.21, 0, 0.215]),  # Update with actual values if needed
     'visualize': True,
-    'detected_color': 'red',  # 'red' or 'blue'
+    'detected_color': 'blue',  # 'red' or 'blue'
+    'duration': 5  # seconds for stabilization
 }
 
 COLOR_RANGES = {
@@ -65,7 +66,10 @@ def compute_world_coords(bbox, config):
     return world_coords
 
 
-def main(config):
+def main(config, override_color=None):
+    if override_color:
+        config['detected_color'] = override_color
+        
     color = config['detected_color']
     if color not in COLOR_RANGES:
         raise ValueError("Color must be 'red' or 'blue'")
@@ -99,6 +103,58 @@ def main(config):
     cv2.destroyAllWindows()
 
 
+def stablized_centers(config=CONFIG, override_color=None):
+    if override_color:
+        config['detected_color'] = override_color
+        
+    color = config['detected_color']
+    
+    if color not in COLOR_RANGES:
+        raise ValueError("Color must be 'red' or 'blue'")
+    lower, upper = COLOR_RANGES[color]
+
+    cap = cv2.VideoCapture(0)
+    if not cap.isOpened():
+        raise RuntimeError("Could not open camera.")
+    
+    world_coords_list = []
+    print("Running stabilization...")
+
+    start_time = time.time()
+    duration = config.get('duration', 5)  # Default to 5 seconds if not specified
+    while time.time() - start_time < duration:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to capture image.")
+            break
+
+        bbox = detect_cube_2d(frame, lower, upper)
+
+        if config['visualize']:
+            draw_cube(frame.copy(), bbox)
+            cv2.waitKey(100)
+
+        coords = compute_world_coords(bbox, config)
+        if coords is not None:
+            # print(f"World Coordinates: {coords}")
+            world_coords_list.append(coords)
+
+        if cv2.waitKey(1) & 0xFF == ord('q'):
+            break
+    
+    
+    cap.release()
+    cv2.destroyAllWindows()
+    
+    if world_coords_list:
+        stabilized_coords = np.mean(world_coords_list, axis=0)
+        print(f"Stabilized World Coordinates: {stabilized_coords}")
+        return stabilized_coords
+    else:
+        print("No valid coordinates detected during stabilization.")
+        return None
+
+
 # ==== RUN ====
 if __name__ == "__main__":
-    main(CONFIG)
+    stablized_centers()
