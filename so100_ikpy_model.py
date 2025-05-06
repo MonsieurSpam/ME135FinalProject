@@ -67,6 +67,9 @@ class SO100Arm:
                 )
             ]
         )
+        # Add position history
+        self.position_history = []
+        self.max_history = 5  # Keep last 5 positions
 
     def forward_kinematics(self, joint_angles):
         """Calculate the end-effector position given joint angles."""
@@ -93,6 +96,12 @@ class SO100Arm:
         """Calculate joint angles to reach the target position with error < 0.005m."""
         if initial_position is None:
             initial_position = [0, 0, 0, 0, 0]
+        
+        # Enforce minimum height constraint
+        min_height = 0.02  # Minimum height in meters
+        if target_position[2] < min_height:
+            print(f"Warning: Target height {target_position[2]}m is below minimum {min_height}m")
+            target_position = [target_position[0], target_position[1], min_height]
         
         best_error = float('inf')
         best_angles = None
@@ -143,8 +152,21 @@ class SO100Arm:
                 achieved_z = achieved_rotation[:, 2]
                 orient_error = abs(np.dot(desired_z, achieved_z) + 1)  # Should be close to 0
                 
-                # Combined error (weighted sum of position and orientation errors)
-                error = pos_error + 0.1 * orient_error
+                # Calculate joint angle change from initial position
+                joint_change = np.linalg.norm(np.array(joint_angles[1:6]) - np.array(initial_position))
+                
+                # Calculate similarity to recent solutions
+                history_error = 0
+                if self.position_history:
+                    for hist_angles in self.position_history:
+                        history_error += np.linalg.norm(np.array(joint_angles[1:6]) - np.array(hist_angles))
+                    history_error /= len(self.position_history)
+                
+                # Combined error (weighted sum of all errors)
+                error = (pos_error + 
+                        0.1 * orient_error + 
+                        0.05 * joint_change + 
+                        0.02 * history_error)
                 
                 if error < best_error:
                     best_error = error
@@ -153,6 +175,10 @@ class SO100Arm:
                 
                 # If we found a good solution, return it
                 if pos_error < 0.001 and orient_error < 0.1:  # 5mm position tolerance, ~5 degree orientation tolerance
+                    # Update position history
+                    self.position_history.append(joint_angles[1:6])
+                    if len(self.position_history) > self.max_history:
+                        self.position_history.pop(0)
                     return joint_angles[1:6]
                 
                 # Try a different initial position for next attempt
@@ -170,6 +196,10 @@ class SO100Arm:
         
         if best_error < float('inf'):
             print(f"Warning: Best solution found has error of {best_error:.3f}")
+            # Update position history with best solution
+            self.position_history.append(best_angles)
+            if len(self.position_history) > self.max_history:
+                self.position_history.pop(0)
             return best_angles
         else:
             print("Error: Could not find a solution within tolerance")
