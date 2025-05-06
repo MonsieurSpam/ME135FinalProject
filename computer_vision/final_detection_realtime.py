@@ -148,13 +148,17 @@ def stablized_centers(config=CONFIG, override_color=None):
     
     if world_coords_list:
         stabilized_coords = np.mean(world_coords_list, axis=0)
-        print(f"Stabilized World Coordinates: {stabilized_coords}")
         return stabilized_coords
     else:
-        print("No valid coordinates detected during stabilization.")
         return None
 
 
 # ==== RUN ====
 if __name__ == "__main__":
-    stablized_centers()
+    color = "blue"  # Change to 'blue' if needed
+    
+    coords = stablized_centers(override_color=color)
+    if coords is not None:
+        print(f"Stabilized World Coordinates: {coords}")
+    else:
+        print("No stable coordinates detected.")
