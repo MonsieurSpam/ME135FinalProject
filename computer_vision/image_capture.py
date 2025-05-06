@@ -5,7 +5,7 @@ def capture_images():
     # Open a connection to the first camera (index 0)
     cap = cv2.VideoCapture(0)
     
-    save_path = 'final_images/'
+    save_path = 'final_images'
     # Create the directory if it doesn't exist
     
     if not os.path.exists(save_path):
@@ -28,7 +28,7 @@ def capture_images():
         # Check if 's' key is pressed to save the image
         if cv2.waitKey(1) & 0xFF == ord('s'):
             # Generate a filename based on the current timestamp
-            filename = f"save_path/image_{int(time.time())}.jpg"
+            filename = f"{save_path}/image_{int(time.time())}.jpg"
             # Save the image
             cv2.imwrite(filename, frame)
             print(f"Image saved as {filename}")
