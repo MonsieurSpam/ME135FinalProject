@@ -39,7 +39,7 @@
 #define DXL_BAUDRATE   1000000
 
 // Maximum number of servos to control
-#define MAX_SERVOS     4
+#define MAX_SERVOS     6
 
 // Add after other defines
 #define POSITION_CONTROL_STACK_SIZE 8192
@@ -51,6 +51,24 @@
 
 // Add these constants near the top with other constants
 #define DEMO_POSITION_DELAY_MS 4000  // Time to hold each position (4 seconds)
+#define GRIPPER_OPEN_POSITION  2500
+#define GRIPPER_CLOSED_POSITION 2048
+#define GRIPPER_MAX_TORQUE     5000   // Maximum torque limit for gripper (adjust based on testing)
+#define GRIPPER_CLOSING_TORQUE 4500   // Lower torque limit for closing to prevent overload
+#define GRIPPER_TORQUE_CHECK_MS 50   // How often to check torque (50ms)
+#define DXL_ADDR_PRESENT_CURRENT 126  // Address for present current in control table
+#define DXL_ADDR_HARDWARE_ERROR_STATUS 70  // Address for hardware error status
+#define DXL_ADDR_OPERATING_MODE 11    // Address for operating mode
+#define DXL_CURRENT_CONTROL_MODE 0    // Current control mode
+#define DXL_POSITION_CONTROL_MODE 3   // Position control mode
+#define DXL_PWM_CONTROL_MODE 16      // PWM control mode
+#define DXL_ADDR_GOAL_PWM 100        // Address for goal PWM
+#define GRIPPER_PWM_LIMIT 885        // Maximum PWM value (about 85% of max)
+#define GRIPPER_OPEN_PWM 300         // Positive PWM to open
+#define GRIPPER_CLOSE_PWM -300       // Negative PWM to close
+#define GRIPPER_ERROR_THRESHOLD 10    // Position error threshold for considering movement complete
+#define GRIPPER_PWM_RAMP_STEPS 10    // Number of steps for PWM ramping
+#define GRIPPER_PWM_RAMP_DELAY_MS 100 // Delay between PWM steps
 
 // Global variables for servo control
 static uint8_t servo_ids[MAX_SERVOS] = {0};
@@ -112,7 +130,9 @@ static void print_main_menu()
     printf("C - Center all servos\n");
     printf("R - Read all servo positions\n");
     printf("d - Run arm demo sequence\n");
-    printf("Iangle1,angle2,angle3,angle4,angle5,angle6 - Move to joint angles\n");
+    printf("Iangle1,angle2,angle3,angle4 - Move to joint angles\n");
+    printf("O - Open gripper\n");
+    printf("G - Close gripper\n");
     printf("\nWaiting for commands...\n");
 }
 
@@ -187,6 +207,12 @@ static void process_center_command(void) {
             case 4:
                 position = MOTOR4_INITIAL_POSITION;  // Wrist
                 break;
+            case 5:
+                position = MOTOR5_INITIAL_POSITION;  // Fixed wrist
+                break;
+            case 6:
+                position = MOTOR6_INITIAL_POSITION;  // Gripper
+                break;
             default:
                 position = 2048;  // Default center position for any other servos
                 break;
@@ -218,119 +244,6 @@ static void process_read_command(void) {
     }
     
     printf("\nOK\n");
-}
-
-// Function declarations
-static void perform_demo_movements(void);
-
-// Function to perform demo movements
-static void perform_demo_movements(void) {
-    ESP_LOGI(TAG, "Starting demo sequence...");
-    
-    // Wait for initial positions to stabilize
-    vTaskDelay(pdMS_TO_TICKS(2000));
-    
-    // Test each joint individually with smaller movements
-    for (int i = 0; i < found_count; i++) {
-        uint8_t id = servo_ids[i];
-        if (id > 4) continue; // Skip gripper motors
-        
-        ESP_LOGI(TAG, "Testing joint %d", id);
-        
-        // Get current position
-        int32_t current_pos;
-        if (!dxl_read_position(id, &current_pos)) {
-            ESP_LOGE(TAG, "Failed to read position for joint %d", id);
-            continue;
-        }
-        
-        // Move slightly in positive direction (smaller movement)
-        pid_controllers[i].target = current_pos + 50;
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        
-        // Move slightly in negative direction (smaller movement)
-        pid_controllers[i].target = current_pos - 50;
-        vTaskDelay(pdMS_TO_TICKS(2000));
-        
-        // Return to original position
-        pid_controllers[i].target = current_pos;
-        vTaskDelay(pdMS_TO_TICKS(2000));
-    }
-    
-    // Coordinated arm movement with smaller ranges
-    ESP_LOGI(TAG, "Performing coordinated arm movement");
-    
-    // Move up and to the right (smaller movements)
-    for (int i = 0; i < found_count; i++) {
-        uint8_t id = servo_ids[i];
-        if (id > 4) continue;
-        
-        int32_t current_pos;
-        if (!dxl_read_position(id, &current_pos)) continue;
-        
-        // Different offsets for each joint (reduced from previous values)
-        switch (id) {
-            case 1: // Base rotation
-                pid_controllers[i].target = current_pos + 100;
-                break;
-            case 2: // Shoulder
-                pid_controllers[i].target = current_pos - 75;
-                break;
-            case 3: // Elbow
-                pid_controllers[i].target = current_pos - 50;
-                break;
-            case 4: // Wrist
-                pid_controllers[i].target = current_pos + 25;
-                break;
-        }
-    }
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    // Move up and to the left (smaller movements)
-    for (int i = 0; i < found_count; i++) {
-        uint8_t id = servo_ids[i];
-        if (id > 4) continue;
-        
-        int32_t current_pos;
-        if (!dxl_read_position(id, &current_pos)) continue;
-        
-        // Different offsets for each joint (reduced from previous values)
-        switch (id) {
-            case 1: // Base rotation
-                pid_controllers[i].target = current_pos - 100;
-                break;
-            case 2: // Shoulder
-                pid_controllers[i].target = current_pos - 75;
-                break;
-            case 3: // Elbow
-                pid_controllers[i].target = current_pos - 50;
-                break;
-            case 4: // Wrist
-                pid_controllers[i].target = current_pos + 25;
-                break;
-        }
-    }
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    // Return to initial positions
-    for (int i = 0; i < found_count; i++) {
-        uint8_t id = servo_ids[i];
-        if (id > 4) continue;
-        
-        switch (id) {
-            case 1:
-                pid_controllers[i].target = 2048;
-                break;
-            case 2:
-            case 3:
-            case 4:
-                pid_controllers[i].target = 2000;
-                break;
-        }
-    }
-    vTaskDelay(pdMS_TO_TICKS(3000));
-    
-    ESP_LOGI(TAG, "Demo sequence completed");
 }
 
 // Add this function before the command processing section
@@ -431,7 +344,105 @@ static void process_ik_command(const char* cmd) {
     }
 }
 
-// Process incoming serial commands
+// Add this function before process_gripper_open_command
+static bool recover_from_hardware_error(uint8_t servo_id) {
+    ESP_LOGW(TAG, "Attempting to recover from hardware error for servo %d", servo_id);
+    
+    // Disable torque
+    if (!dxl_disable_torque(servo_id)) {
+        ESP_LOGE(TAG, "Failed to disable torque during recovery");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Clear hardware error
+    if (!dxl_write_register(servo_id, DXL_ADDR_HARDWARE_ERROR_STATUS, 1, 0)) {
+        ESP_LOGE(TAG, "Failed to clear hardware error");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Set PWM to 0
+    if (!dxl_write_register(servo_id, DXL_ADDR_GOAL_PWM, 2, 0)) {
+        ESP_LOGE(TAG, "Failed to set PWM to 0 during recovery");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    // Re-enable torque
+    if (!dxl_enable_torque(servo_id)) {
+        ESP_LOGE(TAG, "Failed to re-enable torque during recovery");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    ESP_LOGI(TAG, "Recovery completed for servo %d", servo_id);
+    return true;
+}
+
+// Update set_pwm_gradually function
+static bool set_pwm_gradually(int8_t servo_id, int32_t target_pwm) {
+    int32_t current_pwm = 0;
+    int32_t step = target_pwm / GRIPPER_PWM_RAMP_STEPS;
+    
+    // First ensure we start from 0
+    if (!dxl_write_register(servo_id, DXL_ADDR_GOAL_PWM, 2, 0)) {
+        ESP_LOGE(TAG, "Failed to set initial PWM to 0");
+        return false;
+    }
+    vTaskDelay(pdMS_TO_TICKS(200));
+    
+    for (int i = 0; i < GRIPPER_PWM_RAMP_STEPS; i++) {
+        current_pwm += step;
+        
+        // Check for hardware errors before setting PWM
+        uint32_t error_status;
+        if (dxl_read_register(servo_id, DXL_ADDR_HARDWARE_ERROR_STATUS, 1, &error_status)) {
+            if (error_status != 0) {
+                ESP_LOGW(TAG, "Hardware error detected during PWM ramp: 0x%02lx", error_status);
+                if (!recover_from_hardware_error(servo_id)) {
+                    return false;
+                }
+            }
+        }
+        
+        if (!dxl_write_register(servo_id, DXL_ADDR_GOAL_PWM, 2, current_pwm)) {
+            ESP_LOGE(TAG, "Failed to set PWM during ramp");
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(GRIPPER_PWM_RAMP_DELAY_MS));
+    }
+    
+    // Ensure we reach exactly the target PWM
+    if (!dxl_write_register(servo_id, DXL_ADDR_GOAL_PWM, 2, target_pwm)) {
+        ESP_LOGE(TAG, "Failed to set final PWM");
+        return false;
+    }
+    
+    return true;
+}
+
+// Process a command to open the gripper
+static void process_gripper_open_command(void) {
+    // Set PWM to open gripper
+    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_OPEN_PWM)) {
+        printf("ERROR: Failed to set PWM for opening\n");
+        return;
+    }
+    printf("OK\n");
+}
+
+// Process a command to close the gripper
+static void process_gripper_close_command(void) {
+    // Set PWM to close gripper
+    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_CLOSE_PWM)) {
+        printf("ERROR: Failed to set PWM for closing\n");
+        return;
+    }
+    printf("OK\n");
+}
+
+// Update the process_command function
 static void process_command(const char* cmd) {
     // Trim any whitespace
     while (isspace((unsigned char)*cmd)) {
@@ -467,6 +478,14 @@ static void process_command(const char* cmd) {
             
         case 'I': // Move to joint angles
             process_ik_command(cmd);
+            break;
+            
+        case 'O': // Open gripper
+            process_gripper_open_command();
+            break;
+            
+        case 'G': // Close gripper
+            process_gripper_close_command();
             break;
             
         default:
@@ -509,6 +528,42 @@ static void user_input_task(void *pvParameters)
     }
 }
 
+// Add this function declaration before dxl_control_task
+static void initialize_gripper(void);
+
+// Add this function to initialize the gripper
+static void initialize_gripper(void) {
+    // First disable torque
+    if (!dxl_disable_torque(6)) {
+        ESP_LOGE(TAG, "Failed to disable torque during initialization");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Set PWM to 0
+    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, 0)) {
+        ESP_LOGE(TAG, "Failed to set PWM to 0 during initialization");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Enable torque
+    if (!dxl_enable_torque(6)) {
+        ESP_LOGE(TAG, "Failed to enable torque during initialization");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    // Set gripper to closed position
+    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_CLOSE_PWM)) {
+        ESP_LOGE(TAG, "Failed to set initial PWM for gripper");
+        return;
+    }
+    vTaskDelay(pdMS_TO_TICKS(500)); // Give it time to close
+
+    ESP_LOGI(TAG, "Gripper initialized to closed position");
+}
+
 // Dynamixel control task (combined with state machine)
 static void dxl_control_task(void *pvParameters)
 {
@@ -529,6 +584,9 @@ static void dxl_control_task(void *pvParameters)
     if (found_count > 0) {
         ESP_LOGI(TAG, "Found %d servos", found_count);
         
+        // Initialize gripper first
+        initialize_gripper();
+        
         // Create position command queue
         position_command_queue = xQueueCreate(10, sizeof(dxl_position_command_t));
         if (position_command_queue == NULL) {
@@ -540,9 +598,6 @@ static void dxl_control_task(void *pvParameters)
         // Initialize each servo and its control structure
         for (int i = 0; i < found_count; i++) {
             uint8_t id = servo_ids[i];
-            
-            // Skip if this is a gripper motor (IDs 5-6)
-            if (id > 4) continue;
             
             ESP_LOGI(TAG, "Initializing servo ID %d", id);
             
@@ -571,6 +626,8 @@ static void dxl_control_task(void *pvParameters)
                 case 2: control->target_position = MOTOR2_INITIAL_POSITION; break;  // Slightly forward
                 case 3: control->target_position = MOTOR3_INITIAL_POSITION; break;  // Slightly forward
                 case 4: control->target_position = MOTOR4_INITIAL_POSITION; break;  // Slightly forward
+                case 5: control->target_position = MOTOR5_INITIAL_POSITION; break;  // Fixed wrist position
+                case 6: control->target_position = MOTOR6_INITIAL_POSITION; break;  // Open gripper
                 default: control->target_position = 2048; break;
             }
             
@@ -588,12 +645,22 @@ static void dxl_control_task(void *pvParameters)
                 case 4: // Wrist
                     init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, MOTOR4_MAX_VELOCITY);
                     break;
+                case 5: // Fixed wrist
+                    init_pid_controller(&pid_controllers[i], MOTOR5_KP, MOTOR5_KI, MOTOR5_KD, MOTOR5_MAX_VELOCITY);
+                    break;
+                case 6: // Gripper - No PID, using PWM control
+                    // Skip PID initialization for gripper
+                    break;
             }
             
-            pid_controllers[i].target = control->target_position;
+            // Only set PID target for non-gripper motors
+            if (id != 6) {
+                pid_controllers[i].target = control->target_position;
+            }
             
-            ESP_LOGI(TAG, "Servo ID %d initialized with max velocity %d",
-                     id, (int)pid_controllers[i].max_current);
+            ESP_LOGI(TAG, "Servo ID %d initialized%s", 
+                     id, 
+                     (id == 6) ? " with PWM control" : " with max velocity");
         }
         
         // Main control loop

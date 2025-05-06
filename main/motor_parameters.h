@@ -31,4 +31,14 @@
 #define MOTOR4_MAX_VELOCITY 265  // Maximum velocity for wrist
 #define MOTOR4_INITIAL_POSITION 3000
 
+// Motor 5 (Wrist) parameters
+#define MOTOR5_KP 0.1f
+#define MOTOR5_KI 0.01f
+#define MOTOR5_KD 0.05f
+#define MOTOR5_MAX_VELOCITY 265  // Maximum velocity for gripper
+#define MOTOR5_INITIAL_POSITION 2048 
+
+// Motor 6 (Gripper) parameters - PWM control only
+#define MOTOR6_INITIAL_POSITION 2040
+
 #endif // MOTOR_PARAMETERS_H 

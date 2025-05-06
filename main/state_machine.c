@@ -14,7 +14,7 @@
 #define UPDATE_PERIOD_MS 50
 #define POSITION_ERROR_THRESHOLD 20
 #define HOLDING_ERROR_THRESHOLD 100
-#define MAX_SERVOS 4
+#define MAX_SERVOS 6  // Updated to support 6 motors
 #define DIRECTION_CHANGE_THRESHOLD 50
 #define DEADBAND_THRESHOLD 10
 #define HOLDING_STATE_THRESHOLD 15
@@ -27,6 +27,15 @@
 #define MOTOR3_FORWARD_THRESHOLD 1700   // Position threshold where we consider it "forward"
 #define MOTOR2_ELBOW_UP_HOLDING_PWM 800  // Even higher holding PWM when elbow is up
 #define MOTOR3_ELBOW_UP_THRESHOLD 1900   // Position where elbow is considered "up"
+#define DXL_ADDR_OPERATING_MODE 11    // Address for operating mode
+#define DXL_PWM_CONTROL_MODE 16      // PWM control mode
+#define DXL_ADDR_GOAL_PWM 100        // Address for goal PWM
+#define GRIPPER_PWM_LIMIT 885        // Maximum PWM value (about 85% of max)
+#define GRIPPER_ERROR_THRESHOLD 10
+#define GRIPPER_OPEN_PWM 300         // Positive PWM to open
+#define GRIPPER_CLOSE_PWM -300       // Negative PWM to close
+#define GRIPPER_HOLD_OPEN_PWM 30     // Small positive PWM to hold open position
+#define GRIPPER_HOLD_CLOSE_PWM -30   // Small negative PWM to hold closed position
 
 // Global variables
 static dxl_servo_control_t servo_controls[MAX_SERVOS];
@@ -117,12 +126,12 @@ void state_machine_init(void) {
         ESP_LOGI(TAG, "Found servo ID: %d", servo_ids[i]);
     }
     
-    // Initialize all motors (1-4)
+    // Initialize all motors (1-6)
     for (int i = 0; i < found_count; i++) {
         uint8_t id = servo_ids[i];
         
-        // Only process motors 1-4
-        if (id < 1 || id > 4) continue;
+        // Only process motors 1-6
+        if (id < 1 || id > 6) continue;
         
         dxl_servo_control_t *control = &servo_controls[i];
         memset(control, 0, sizeof(dxl_servo_control_t));
@@ -148,9 +157,30 @@ void state_machine_init(void) {
                 control->target_position = MOTOR4_INITIAL_POSITION;
                 init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, MOTOR4_MAX_VELOCITY);
                 break;
+            case 5: // Fixed wrist
+                control->target_position = MOTOR5_INITIAL_POSITION;
+                init_pid_controller(&pid_controllers[i], MOTOR5_KP, MOTOR5_KI, MOTOR5_KD, MOTOR5_MAX_VELOCITY);
+                break;
+            case 6: // Gripper
+                control->target_position = MOTOR6_INITIAL_POSITION;
+                // For gripper, switch to PWM control mode
+                if (!dxl_write_register(6, DXL_ADDR_OPERATING_MODE, 1, DXL_PWM_CONTROL_MODE)) {
+                    ESP_LOGE(TAG, "Failed to switch gripper to PWM control mode");
+                    continue;
+                }
+                vTaskDelay(pdMS_TO_TICKS(100));
+                // Set initial PWM to 0
+                if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, 0)) {
+                    ESP_LOGE(TAG, "Failed to set initial PWM for gripper");
+                    continue;
+                }
+                break;
         }
         
-        pid_controllers[i].target = control->target_position;
+        // Only set PID target for non-gripper motors
+        if (id != 6) {
+            pid_controllers[i].target = control->target_position;
+        }
         
         ESP_LOGI(TAG, "Motor %d initialized with max velocity %" PRId32,
                  id, (int32_t)pid_controllers[i].max_current);
@@ -173,6 +203,13 @@ void state_machine_update(void) {
         }
         servo_controls[i].current_position = current_pos;
         
+        // Special handling for gripper (motor 6) using PWM control
+        if (servo_controls[i].id == 6) {
+            // Skip motor 6 in state machine - it's controlled directly by PWM commands
+            continue;
+        }
+        
+        // For other motors, use PID control
         // Calculate error
         int32_t target_pos = servo_controls[i].target_position;
         float error = target_pos - current_pos;
@@ -193,6 +230,8 @@ void state_machine_update(void) {
                              (velocity < -MOTOR3_MAX_VELOCITY) ? -MOTOR3_MAX_VELOCITY : velocity; break;
             case 4: velocity = (velocity > MOTOR4_MAX_VELOCITY) ? MOTOR4_MAX_VELOCITY : 
                              (velocity < -MOTOR4_MAX_VELOCITY) ? -MOTOR4_MAX_VELOCITY : velocity; break;
+            case 5: velocity = (velocity > MOTOR5_MAX_VELOCITY) ? MOTOR5_MAX_VELOCITY : 
+                             (velocity < -MOTOR5_MAX_VELOCITY) ? -MOTOR5_MAX_VELOCITY : velocity; break;
         }
         
         // Set velocity based on state
@@ -266,12 +305,28 @@ bool state_machine_get_velocity(uint8_t id, int32_t *velocity) {
 // Emergency stop all servos
 void state_machine_emergency_stop(void) {
     for (int i = 0; i < found_count; i++) {
-        dxl_servo_control_t *control = &servo_controls[i];
-        control->state = DXL_STATE_IDLE;
-        control->current_velocity = 0;
-        dxl_set_velocity(control->id, 0);
+        if (servo_controls[i].id == 0) continue; // Skip unused slots
+        
+        // Special handling for gripper (motor 6)
+        if (servo_controls[i].id == 6) {
+            // Set PWM to 0 to stop
+            if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, 0)) {
+                ESP_LOGE(TAG, "Failed to stop PWM for servo ID 6");
+            }
+            // Keep in PWM control mode
+            if (!dxl_write_register(6, DXL_ADDR_OPERATING_MODE, 1, DXL_PWM_CONTROL_MODE)) {
+                ESP_LOGE(TAG, "Failed to maintain PWM control mode for servo ID 6");
+            }
+            servo_controls[i].state = DXL_STATE_HOLDING;
+            continue;
+        }
+        
+        // For other motors, set velocity to 0
+        if (!dxl_set_velocity(servo_controls[i].id, 0)) {
+            ESP_LOGE(TAG, "Failed to stop servo ID %d", servo_controls[i].id);
+        }
+        servo_controls[i].state = DXL_STATE_HOLDING;
     }
-    ESP_LOGI(TAG, "Emergency stop activated");
 }
 
 // Update position control task
@@ -321,6 +376,8 @@ void dxl_position_control_task(void *pvParameters)
                 case 2: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR2_MAX_VELOCITY), -MOTOR2_MAX_VELOCITY); break;
                 case 3: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR3_MAX_VELOCITY), -MOTOR3_MAX_VELOCITY); break;
                 case 4: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR4_MAX_VELOCITY), -MOTOR4_MAX_VELOCITY); break;
+                case 5: limited_velocity = (int32_t)fmaxf(fminf(velocity, MOTOR5_MAX_VELOCITY), -MOTOR5_MAX_VELOCITY); break;
+                case 6: continue; // Skip PID control for gripper
                 default: limited_velocity = 0; break;
             }
             
@@ -337,7 +394,7 @@ void dxl_position_control_task(void *pvParameters)
             ESP_LOGI(TAG, "Servo %d: Set velocity to %" PRId32, servo_controls[i].id, limited_velocity);
             
             // Update state based on error
-            if (fabsf(error) < 15) {  // Use fabsf for float comparison
+            if (abs(error) < 15) {  // Use abs for integer comparison
                 if (servo_controls[i].state == DXL_STATE_MOVING) {
                     servo_controls[i].state = DXL_STATE_HOLDING;
                     ESP_LOGI(TAG, "Servo %d: Transitioned to HOLDING state", servo_controls[i].id);

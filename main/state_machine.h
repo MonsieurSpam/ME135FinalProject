@@ -38,7 +38,7 @@ typedef struct {
     int32_t target_position;        // Target position
     int32_t current_position;       // Current position
     int32_t current_velocity;      // Current velocity
-    pid_controller_t pid;           // PID controller
+    pid_controller_t* pid;          // PID controller (NULL for gripper)
     uint32_t last_update_time;      // Last update timestamp
 } dxl_servo_control_t;
 
