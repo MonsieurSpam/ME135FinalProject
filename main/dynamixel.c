@@ -28,6 +28,7 @@
 #define DXL_LOWORD(l) ((uint16_t)((l) & 0xFFFF))
 #define DXL_HIWORD(l) ((uint16_t)(((l) >> 16) & 0xFFFF))
 #define DXL_MAKEWORD(a, b) ((uint16_t)(((uint8_t)(a)) | ((uint16_t)((uint8_t)(b))) << 8))
+#define DXL_MAKEDWORD(w1, w2) ((uint32_t)(((uint16_t)(w1)) | ((uint32_t)((uint16_t)(w2))) << 16)))
 
 // Dynamixel instruction values
 #define DXL_INST_PING 0x01
@@ -44,6 +45,10 @@
 #define DXL_ADDR_HARDWARE_ERROR     70
 #define DXL_ADDR_PROFILE_VELOCITY   112
 #define DXL_ADDR_PROFILE_ACCELERATION 108
+#define DXL_ADDR_GOAL_CURRENT       102
+#define DXL_ADDR_GOAL_PWM           100
+#define DXL_ADDR_GOAL_VELOCITY      104
+#define DXL_ADDR_PRESENT_LOAD       126
 
 // Static variables for UART configuration
 static uint8_t dxl_uart_num = 0;
@@ -201,9 +206,11 @@ static int dxl_read_status_packet(uint8_t *error, uint8_t *param_buffer, uint16_
     uint8_t rxpacket[DXL_PACKET_MAX_LENGTH] = {0};
     uint16_t rx_index = 0;
     
-    // Wait for data with timeout
-    const int MAX_RETRIES = 100; // 1 second timeout (10ms checks)
+    // Wait for data with longer timeout
+    const int MAX_RETRIES = 200; // 2 second timeout (10ms checks)
     int retry_count = 0;
+    int consecutive_empty_reads = 0;
+    const int MAX_EMPTY_READS = 5; // Maximum consecutive empty reads before giving up
     
     while (1) {
         // Check for data
@@ -212,22 +219,50 @@ static int dxl_read_status_packet(uint8_t *error, uint8_t *param_buffer, uint16_
         
         if (available_bytes <= 0) {
             retry_count++;
+            consecutive_empty_reads++;
+            
+            if (consecutive_empty_reads >= MAX_EMPTY_READS) {
+                ESP_LOGE(TAG, "Too many consecutive empty reads, giving up");
+                return DXL_COMM_RX_ERROR;
+            }
+            
             if (retry_count > MAX_RETRIES) {
-                ESP_LOGE(TAG, "No data received within timeout period (1000 ms)");
+                ESP_LOGE(TAG, "No data received within timeout period (2000 ms)");
                 return DXL_COMM_RX_ERROR;
             }
             vTaskDelay(pdMS_TO_TICKS(10)); // 10ms delay between checks
             continue;
         }
         
+        // Reset empty read counter when we get data
+        consecutive_empty_reads = 0;
+        
         // Read data
         int bytes_to_read = (available_bytes > DXL_PACKET_MAX_LENGTH) ? DXL_PACKET_MAX_LENGTH : available_bytes;
-        int bytes_read = uart_read_bytes(dxl_uart_num, rxpacket, bytes_to_read, 100 / portTICK_PERIOD_MS);
+        int bytes_read = uart_read_bytes(dxl_uart_num, rxpacket + rx_index, bytes_to_read, 100 / portTICK_PERIOD_MS);
+        
         if (bytes_read > 0) {
-            rx_index = bytes_read;
-            ESP_LOGI(TAG, "Received %d bytes:", rx_index);
+            rx_index += bytes_read;
+            ESP_LOGI(TAG, "Received %d bytes (total %d):", bytes_read, rx_index);
             ESP_LOG_BUFFER_HEX(TAG, rxpacket, rx_index);
-            break;
+            
+            // Check if we have a complete packet
+            if (rx_index >= 10) { // Minimum valid packet length
+                // Verify header
+                if (rxpacket[0] == 0xFF && rxpacket[1] == 0xFF && rxpacket[2] == 0xFD && rxpacket[3] == 0x00) {
+                    uint16_t length = DXL_MAKEWORD(rxpacket[5], rxpacket[6]);
+                    uint16_t expected_length = length + 7; // Header(3) + Reserved(1) + ID(1) + Length(2) + data + CRC(2)
+                    
+                    if (rx_index >= expected_length) {
+                        // We have a complete packet
+                        break;
+                    }
+                } else {
+                    // Invalid header, clear buffer and continue
+                    ESP_LOGW(TAG, "Invalid header, clearing buffer");
+                    rx_index = 0;
+                }
+            }
         }
     }
     
@@ -578,66 +613,98 @@ bool dxl_set_position(uint8_t id, uint32_t position)
     }
 }
 
-bool dxl_read_position(uint8_t id, uint32_t *position)
+bool dxl_read_position(uint8_t id, int32_t *position)
 {
-    if (!dxl_initialized) {
-        ESP_LOGE(TAG, "Dynamixel not initialized");
+    if (!dxl_initialized || position == NULL) {
+        ESP_LOGE(TAG, "Invalid parameters for dxl_read_position");
         return false;
     }
-    
-    if (position == NULL) {
-        ESP_LOGE(TAG, "NULL pointer provided to dxl_read_position");
-        return false;
-    }
-    
-    uint8_t parameters[4];
-    parameters[0] = DXL_LOBYTE(DXL_ADDR_PRESENT_POSITION);
-    parameters[1] = DXL_HIBYTE(DXL_ADDR_PRESENT_POSITION);
-    parameters[2] = DXL_LOBYTE(4); // Read 4 bytes (32-bit position)
-    parameters[3] = DXL_HIBYTE(4);
-    
-    dxl_send_packet(id, DXL_INST_READ, parameters, 4);
-    
-    uint8_t error = 0;
-    uint8_t recv_params[16] = {0};
-    uint16_t recv_length = 0;
-    
-    int result = dxl_read_status_packet(&error, recv_params, &recv_length);
-    
-    if (result == DXL_COMM_SUCCESS && error == 0) {
-        if (recv_length >= 4) {
-            *position = DXL_MAKEWORD(recv_params[0], recv_params[1]) | 
-                       (DXL_MAKEWORD(recv_params[2], recv_params[3]) << 16);
-            ESP_LOGI(TAG, "Current position of servo ID %d: %d", id, (int)*position);
-            return true;
-        } else {
-            ESP_LOGE(TAG, "Did not receive enough data for position");
-            return false;
+
+    // Send read command for position (4 bytes)
+    uint8_t params[5] = {
+        0x84, 0x00,  // Address 132 (0x84)
+        0x04, 0x00   // Length 4 bytes
+    };
+
+    // Try up to 3 times to get a complete response
+    for (int attempt = 0; attempt < 3; attempt++) {
+        if (attempt > 0) {
+            ESP_LOGW(TAG, "Retrying position read for servo %d (attempt %d)", id, attempt + 1);
+            vTaskDelay(pdMS_TO_TICKS(50)); // Small delay between attempts
         }
-    } else {
-        ESP_LOGE(TAG, "Failed to read position for servo ID %d", id);
-        return false;
+
+        // Clear buffer before sending new command
+        dxl_clear_buffer();
+        
+        dxl_send_packet(id, DXL_INST_READ, params, 5);
+
+        // Add a small delay before reading response
+        vTaskDelay(pdMS_TO_TICKS(10));
+
+        // Read response
+        uint8_t error = 0;
+        uint8_t param_buffer[16] = {0};
+        uint16_t param_length = 0;
+
+        int result = dxl_read_status_packet(&error, param_buffer, &param_length);
+        if (result != DXL_COMM_SUCCESS) {
+            ESP_LOGE(TAG, "Failed to read position from servo %d: %d", id, result);
+            continue;
+        }
+
+        if (error != 0) {
+            ESP_LOGE(TAG, "Servo %d returned error 0x%02X while reading position", id, error);
+            // Check if this is a hardware error
+            uint8_t hw_error = 0;
+            if (dxl_read_error(id, &hw_error)) {
+                ESP_LOGE(TAG, "Servo %d hardware error: 0x%02X", id, hw_error);
+            }
+            continue;
+        }
+
+        // Check if we received enough data
+        if (param_length < 4) {
+            ESP_LOGW(TAG, "Insufficient data received for position (got %d bytes, need 4)", param_length);
+            // Log the actual bytes received for debugging
+            ESP_LOG_BUFFER_HEX(TAG, param_buffer, param_length);
+            continue;
+        }
+
+        // Extract position (4 bytes) as signed 32-bit value
+        *position = (int32_t)((param_buffer[3] << 24) | (param_buffer[2] << 16) | 
+                             (param_buffer[1] << 8) | param_buffer[0]);
+
+        ESP_LOGI(TAG, "Servo %d position: %" PRId32 " (0x%08" PRIX32 ")", id, *position, (uint32_t)*position);
+        return true;
     }
+
+    ESP_LOGE(TAG, "Failed to read position from servo %d after 3 attempts", id);
+    return false;
 }
 
-bool dxl_set_velocity(uint8_t id, uint32_t velocity)
+bool dxl_set_velocity(uint8_t id, int32_t velocity)
 {
     if (!dxl_initialized) {
         ESP_LOGE(TAG, "Dynamixel not initialized");
         return false;
     }
+    
+    // Limit velocity value to valid range (-265 to 265)
+    if (velocity > 265) velocity = 265;
+    if (velocity < -265) velocity = -265;
     
     ESP_LOGI(TAG, "Setting velocity for servo ID %d: %d", id, (int)velocity);
     
-    uint8_t parameters[6];
-    parameters[0] = DXL_LOBYTE(DXL_ADDR_PROFILE_VELOCITY);
-    parameters[1] = DXL_HIBYTE(DXL_ADDR_PROFILE_VELOCITY);
-    parameters[2] = DXL_LOBYTE(DXL_LOWORD(velocity));
-    parameters[3] = DXL_HIBYTE(DXL_LOWORD(velocity));
-    parameters[4] = DXL_LOBYTE(DXL_HIWORD(velocity));
-    parameters[5] = DXL_HIBYTE(DXL_HIWORD(velocity));
+    // Set the goal velocity (4 bytes in little-endian order)
+    uint8_t goal_params[6];
+    goal_params[0] = DXL_LOBYTE(DXL_ADDR_GOAL_VELOCITY);
+    goal_params[1] = DXL_HIBYTE(DXL_ADDR_GOAL_VELOCITY);
+    goal_params[2] = (velocity >> 0) & 0xFF;  // LSB
+    goal_params[3] = (velocity >> 8) & 0xFF;
+    goal_params[4] = (velocity >> 16) & 0xFF;
+    goal_params[5] = (velocity >> 24) & 0xFF;  // MSB
     
-    dxl_send_packet(id, DXL_INST_WRITE, parameters, 6);
+    dxl_send_packet(id, DXL_INST_WRITE, goal_params, 6);
     
     uint8_t error = 0;
     uint8_t recv_params[16] = {0};
@@ -649,7 +716,7 @@ bool dxl_set_velocity(uint8_t id, uint32_t velocity)
         ESP_LOGI(TAG, "Velocity set for servo ID %d", id);
         return true;
     } else {
-        ESP_LOGE(TAG, "Failed to set velocity for servo ID %d", id);
+        ESP_LOGE(TAG, "Failed to set goal velocity for servo ID %d, error: 0x%02X", id, error);
         return false;
     }
 }
@@ -807,6 +874,118 @@ bool dxl_write_register(uint8_t id, uint16_t address, uint8_t size, uint32_t val
         return true;
     } else {
         ESP_LOGE(TAG, "Failed to write register to servo ID %d", id);
+        return false;
+    }
+}
+
+bool dxl_set_pwm(uint8_t id, int16_t pwm) {
+    if (!dxl_initialized) {
+        ESP_LOGE(TAG, "Dynamixel not initialized");
+        return false;
+    }
+
+    // Read the actual PWM limit from the servo
+    uint32_t pwm_limit = 0;
+    if (!dxl_read_register(id, DXL_ADDR_PWM_LIMIT, 2, &pwm_limit)) {
+        ESP_LOGE(TAG, "Failed to read PWM limit for servo ID %d", id);
+        return false;
+    }
+    ESP_LOGI(TAG, "Servo ID %d PWM limit: %" PRIu32, id, pwm_limit);
+
+    // Limit PWM value to valid range (-pwm_limit to pwm_limit)
+    if (pwm > (int16_t)pwm_limit) {
+        ESP_LOGW(TAG, "PWM value %d exceeds limit %" PRIu32 ", limiting to %" PRIu32, pwm, pwm_limit, pwm_limit);
+        pwm = pwm_limit;
+    } else if (pwm < -(int16_t)pwm_limit) {
+        ESP_LOGW(TAG, "PWM value %d below limit -%" PRIu32 ", limiting to -%" PRIu32, pwm, pwm_limit, pwm_limit);
+        pwm = -pwm_limit;
+    }
+
+    // Check current operating mode
+    uint32_t current_mode = 0;
+    if (!dxl_read_register(id, DXL_ADDR_OPERATING_MODE, 1, &current_mode)) {
+        ESP_LOGE(TAG, "Failed to read operating mode for servo ID %d", id);
+        return false;
+    }
+
+    // Switch to PWM mode if needed
+    if (current_mode != DXL_OPERATING_MODE_PWM) {
+        ESP_LOGI(TAG, "Switching servo ID %d to PWM mode (current mode: %" PRIu32 ")", id, current_mode);
+        
+        // Disable torque before changing mode
+        if (!dxl_disable_torque(id)) {
+            ESP_LOGE(TAG, "Failed to disable torque for servo ID %d", id);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100)); // Wait for torque to disable
+
+        // Set PWM mode
+        if (!dxl_set_operating_mode(id, DXL_OPERATING_MODE_PWM)) {
+            ESP_LOGE(TAG, "Failed to set PWM mode for servo ID %d", id);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100)); // Wait for mode change
+
+        // Re-enable torque
+        if (!dxl_enable_torque(id)) {
+            ESP_LOGE(TAG, "Failed to enable torque for servo ID %d", id);
+            return false;
+        }
+        vTaskDelay(pdMS_TO_TICKS(100)); // Wait for torque to enable
+    }
+
+    // Send PWM command - pwm is already in two's complement format
+    uint8_t parameters[4] = {
+        DXL_LOBYTE(DXL_ADDR_GOAL_PWM),  // Address low byte
+        DXL_HIBYTE(DXL_ADDR_GOAL_PWM),  // Address high byte
+        DXL_LOBYTE(pwm),                // PWM value low byte (two's complement)
+        DXL_HIBYTE(pwm)                 // PWM value high byte (two's complement)
+    };
+
+    ESP_LOGI(TAG, "Setting PWM for servo ID %d: %d (0x%04X)", id, pwm, (uint16_t)pwm);
+    dxl_send_packet(id, DXL_INST_WRITE, parameters, 4);
+
+    return true;
+}
+
+bool dxl_read_load(uint8_t id, int16_t *load)
+{
+    if (!dxl_initialized) {
+        ESP_LOGE(TAG, "Dynamixel not initialized");
+        return false;
+    }
+
+    if (load == NULL) {
+        ESP_LOGE(TAG, "NULL pointer provided to dxl_read_load");
+        return false;
+    }
+
+    uint8_t parameters[4];
+    parameters[0] = DXL_LOBYTE(DXL_ADDR_PRESENT_LOAD);
+    parameters[1] = DXL_HIBYTE(DXL_ADDR_PRESENT_LOAD);
+    parameters[2] = DXL_LOBYTE(2); // Read 2 bytes
+    parameters[3] = DXL_HIBYTE(2);
+
+    dxl_send_packet(id, DXL_INST_READ, parameters, 4);
+
+    uint8_t error = 0;
+    uint8_t recv_params[16] = {0};
+    uint16_t recv_length = 0;
+
+    int result = dxl_read_status_packet(&error, recv_params, &recv_length);
+
+    if (result == DXL_COMM_SUCCESS && error == 0) {
+        if (recv_length >= 2) {
+            // Convert to signed 16-bit value
+            *load = (int16_t)((recv_params[1] << 8) | recv_params[0]);
+            ESP_LOGI(TAG, "Current load of servo ID %d: %d (0.1%%)", id, *load);
+            return true;
+        } else {
+            ESP_LOGE(TAG, "Did not receive enough data for load reading");
+            return false;
+        }
+    } else {
+        ESP_LOGE(TAG, "Failed to read load for servo ID %d", id);
         return false;
     }
 } 

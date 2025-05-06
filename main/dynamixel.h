@@ -26,10 +26,45 @@
 #define DXL_OPERATING_MODE_CURRENT_BASED_POSITION 5
 #define DXL_OPERATING_MODE_PWM 16
 
+// Velocity control parameters
+#define DXL_MAX_VELOCITY    1023    // Maximum velocity (about 114 RPM)
+#define DXL_MIN_VELOCITY    -1023   // Minimum velocity (about -114 RPM)
+#define DXL_VELOCITY_UNIT   0.229   // RPM per unit
+
 // Common positions
 #define DXL_MIN_POSITION 0
 #define DXL_MAX_POSITION 4095
 #define DXL_CENTER_POSITION 2048
+
+// Dynamixel register addresses
+#define DXL_ADDR_TORQUE_ENABLE 64
+#define DXL_ADDR_LED 65
+#define DXL_ADDR_OPERATING_MODE 11
+#define DXL_ADDR_GOAL_POSITION 116
+#define DXL_ADDR_PRESENT_POSITION 132
+#define DXL_ADDR_MOVING 122
+#define DXL_ADDR_HARDWARE_ERROR 70
+#define DXL_ADDR_PROFILE_VELOCITY 112
+#define DXL_ADDR_PROFILE_ACCELERATION 108
+#define DXL_ADDR_GOAL_CURRENT 102
+#define DXL_ADDR_GOAL_PWM 100
+#define DXL_ADDR_GOAL_VELOCITY 104
+#define DXL_ADDR_PRESENT_LOAD 126
+#define DXL_ADDR_PWM_LIMIT 36
+
+// XL330-M288 specific addresses
+#define DXL330_ADDR_GOAL_PWM 100
+#define DXL330_ADDR_PRESENT_LOAD 126
+#define DXL330_ADDR_PWM_LIMIT 36
+
+// PWM control
+#define DXL_PWM_LIMIT 885  // Maximum PWM value (0.113% per unit)
+#define DXL_MIN_PWM (-DXL_PWM_LIMIT)
+#define DXL_MAX_PWM DXL_PWM_LIMIT
+#define DXL330_MAX_PWM 885  // 100% duty cycle for XL330
+#define DXL330_MIN_PWM -885 // -100% duty cycle for XL330
+#define DXL_MAX_LOAD 1000  // 100% load
+#define DXL_MIN_LOAD -1000 // -100% load
 
 /**
  * @brief Initialize the Dynamixel communication interface
@@ -104,7 +139,7 @@ bool dxl_set_position(uint8_t id, uint32_t position);
  * @param position Pointer to store the current position
  * @return true if successful, false otherwise
  */
-bool dxl_read_position(uint8_t id, uint32_t *position);
+bool dxl_read_position(uint8_t id, int32_t *position);
 
 /**
  * @brief Set the velocity profile of a Dynamixel servo
@@ -113,7 +148,7 @@ bool dxl_read_position(uint8_t id, uint32_t *position);
  * @param velocity Velocity value (0-1023)
  * @return true if successful, false otherwise
  */
-bool dxl_set_velocity(uint8_t id, uint32_t velocity);
+bool dxl_set_velocity(uint8_t id, int32_t velocity);
 
 /**
  * @brief Set the acceleration profile of a Dynamixel servo
@@ -154,5 +189,32 @@ bool dxl_read_register(uint8_t id, uint16_t address, uint8_t size, uint32_t *val
  * @return true if successful, false otherwise
  */
 bool dxl_write_register(uint8_t id, uint16_t address, uint8_t size, uint32_t value);
+
+/**
+ * @brief Set the torque (current) of a Dynamixel servo
+ * 
+ * @param id ID of the servo
+ * @param current Target current value (0-2047, where 2047 is max current)
+ * @return true if successful, false otherwise
+ */
+bool dxl_set_current(uint8_t id, uint32_t current);
+
+/**
+ * @brief Set the PWM value of a Dynamixel servo
+ * 
+ * @param id ID of the servo
+ * @param pwm Target PWM value (-885 to 885, where 885 is 100% power)
+ * @return true if successful, false otherwise
+ */
+bool dxl_set_pwm(uint8_t id, int16_t pwm);
+
+/**
+ * @brief Read the current load/torque of a Dynamixel servo
+ * 
+ * @param id ID of the servo
+ * @param load Pointer to store the load value (-1000 to 1000, in 0.1% units)
+ * @return true if successful, false otherwise
+ */
+bool dxl_read_load(uint8_t id, int16_t *load);
 
 #endif /* DYNAMIXEL_H */ 

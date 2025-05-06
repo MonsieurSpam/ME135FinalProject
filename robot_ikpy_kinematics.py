@@ -19,98 +19,128 @@ from ikpy.link import OriginLink, URDFLink
 import matplotlib.pyplot as plt
 from mpl_toolkits.mplot3d import Axes3D
 
-# Modify these values with your actual measurements (in meters)
-BASE_HEIGHT = 0.04  # Base to joint 1 (Z axis) - 4 cm
-LINK_1_2_LENGTH = 0.02  # Joint 1 to joint 2 - 2 cm
-LINK_2_3_LENGTH = 0.12  # Joint 2 to joint 3 - 12 cm
-LINK_3_4_LENGTH = 0.14  # Joint 3 to joint 4 - 14 cm
-LINK_4_5_LENGTH = 0.04  # Joint 4 to joint 5 - 4 cm
-LINK_5_6_LENGTH = 0.01  # Joint 5 to joint 6 - 1 cm
-END_EFFECTOR_LENGTH = 0.05  # Joint 6 to end-effector - 5 cm
+# Robot‑arm geometry — update with your real measurements  (all in metres)
+BASE_HEIGHT        = 0.04   # Base to joint‑1 axis  (Z)
+LINK_1_2_LENGTH    = 0.02   # Joint‑1 → joint‑2  offset
+LINK_2_3_LENGTH    = 0.15   # Joint‑2 → joint‑3  (upper arm length)
+LINK_3_4_LENGTH    = 0.15   # Joint‑3 → joint‑4  (fore‑arm length)
+LINK_4_5_LENGTH    = 0.05   # Joint‑4 → joint‑5  (wrist yaw → wrist pitch)
+LINK_5_6_LENGTH    = 0.00   # Joint‑5 → gripper pivot (inside shell) – no offset
+END_EFFECTOR_LENGTH = 0.05  # Gripper pivot → TCP (camera lens / finger tips)
 
-# Custom joint limits for Dynamixel servo motors
-# Format: [min_position, max_position, min_angle_degrees, max_angle_degrees]
-JOINT_1_LIMITS = [1027, 2975, 0, 180]  # Joint 1 (base) - Max: 2975 (counter clockwise) 180 degrees, Min: 1027 / 0 degrees (clockwise)
-JOINT_2_LIMITS = [1582, 2806, 0, 180]  # Joint 2 (shoulder) - Max: 1582 0 degrees, 2806 180 degrees
-JOINT_3_LIMITS = [1241, 3000, 0, 180]  # Joint 3 (elbow) - Max: 1241 (straight) 0 degrees, Min: 3000 180 degrees
-JOINT_4_LIMITS = [1523, 2476, 0, 90]   # Joint 4 (wrist rotation) - Max: 1523 (backward) 0 degrees, Min: 2476 (forward) 90 degrees
-JOINT_5_LIMITS = [1830, 2200, 0, 45]   # Joint 5 (wrist pitch) - Max: 2200 (clockwise) 45 degrees, Min: 1830 (counter clockwise) 0 degrees
-JOINT_6_LIMITS = [2000, 2634, 90, 0]   # Joint 6 (gripper) - Max: 2634 (open) 0 degrees, Min: 2000 (closed) 90 degrees
+# Custom Dynamixel limits  [min_pos, max_pos, min_deg, max_deg]
+JOINT_1_LIMITS = [1027, 3096,  90, 270]   # base yaw
+JOINT_2_LIMITS = [ 140, 2806, 140, 270]   # shoulder pitch
+JOINT_3_LIMITS = [1024, 3000, 180, 270]   # elbow pitch
+JOINT_4_LIMITS = [1523, 2476,  90, 270]   # wrist yaw (roll)
+JOINT_5_LIMITS = [1830, 2200,   0,  45]   # wrist pitch
+JOINT_6_LIMITS = [2000, 2634,   0,  90]   # gripper (NOT part of IK)
+
+from math import pi
+import ikpy
+from ikpy.chain import Chain
+from ikpy.link  import URDFLink, OriginLink
 
 class RobotArmIKPy:
     def __init__(self):
-        # Create a kinematic chain for the robot arm using IKPy
-        self.chain = ikpy.chain.Chain(
+        # ------------------ build kinematic chain ------------------
+        # Joint‑6 (gripper) is kept as a *fixed* link (rotation=None)
+        # so IKPy solves only the 5 positioning joints.
+        self.chain = Chain(
             name="robot_arm",
             links=[
-                OriginLink(),  # Base link
+                OriginLink(),  # World / base frame
                 URDFLink(
-                    name="joint1",
+                    name="joint1",                                  # base yaw (Z)
                     origin_translation=[0, 0, BASE_HEIGHT],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 1]  # Rotation around Z axis
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 0, 1],
+                    bounds=(-pi/2, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint2",
+                    name="joint2",                                  # shoulder pitch (Y)
                     origin_translation=[0, 0, LINK_1_2_LENGTH],
-                    origin_orientation=[0, -pi/2, 0],
-                    rotation=[0, 1, 0]  # Rotation around Y axis
+                    origin_orientation=[0, 0, 0],
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(-pi/2, 0)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint3",
+                    name="joint3",                                  # elbow pitch (Y)
                     origin_translation=[LINK_2_3_LENGTH, 0, 0],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 1, 0]  # Rotation around Y axis
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(0, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint4",
+                    name="joint4",                                  # wrist yaw / roll (Z)
                     origin_translation=[LINK_3_4_LENGTH, 0, 0],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 1]  # Rotation around Z axis
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 0, 1],
+                    bounds=(0, pi/2)  # Add joint limits
                 ),
                 URDFLink(
-                    name="joint5",
+                    name="joint5",                                  # wrist pitch (Y)
                     origin_translation=[0, 0, LINK_4_5_LENGTH],
-                    origin_orientation=[0, -pi/2, 0],
-                    rotation=[0, 1, 0]  # Rotation around Y axis
+                    origin_orientation=[0, 0, 0],
+                    use_symbolic_matrix=True,
+                    joint_type="revolute",
+                    rotation=[0, 1, 0],
+                    bounds=(-pi/4, pi/4)  # Add joint limits
                 ),
-                URDFLink(
+                URDFLink(                                           # gripper pivot – NO DoF
                     name="joint6",
                     origin_translation=[0, 0, LINK_5_6_LENGTH],
-                    origin_orientation=[0, pi/2, 0],
-                    rotation=[0, 0, 1]  # Rotation around Z axis
+                    origin_orientation=[0, 0, 0],
+                    use_symbolic_matrix=True,
+                    joint_type="fixed",
+                    rotation=None,            # <- fixed link, removed from IK DoF
+                    translation=None
                 ),
-                URDFLink(
+                URDFLink(                                           # TCP
                     name="end_effector",
                     origin_translation=[0, 0, END_EFFECTOR_LENGTH],
                     origin_orientation=[0, 0, 0],
-                    rotation=[0, 0, 0]  # Fixed link (no rotation)
+                    use_symbolic_matrix=True,
+                    joint_type="fixed",
+                    rotation=None,       # fixed link
+                    translation=None
                 )
             ]
         )
-        
-        # Convert degree limits to radians for IKPy
+
+        # ------------------ IKPy joint‑angle limits -----------------
+        # Angles are expressed in *radians* and centred around the
+        # mechanical zero you defined above.
         self.joint_limits = [
-            [radians(JOINT_1_LIMITS[2] - 90), radians(JOINT_1_LIMITS[3] - 90)],   # Joint 1: shifting to [-90, 90] range
-            [radians(JOINT_2_LIMITS[2] - 90), radians(JOINT_2_LIMITS[3] - 90)],   # Joint 2: shifting to [-90, 90] range
-            [radians(JOINT_3_LIMITS[2] - 90), radians(JOINT_3_LIMITS[3] - 90)],   # Joint 3: shifting to [-90, 90] range
-            [radians(JOINT_4_LIMITS[2] - 45), radians(JOINT_4_LIMITS[3] - 45)],   # Joint 4: shifting to [-45, 45] range
-            [radians(JOINT_5_LIMITS[2] - 22.5), radians(JOINT_5_LIMITS[3] - 22.5)], # Joint 5: shifting to [-22.5, 22.5] range
-            [radians(JOINT_6_LIMITS[2] - 45), radians(JOINT_6_LIMITS[3] - 45)]    # Joint 6: shifting to [-45, 45] range
+            [-pi/2,  pi/2],    # J1:  90° → 270°
+            [-pi/2,     0],    # J2: 140° → 270°
+            [    0,  pi/2],    # J3: 180° → 270°
+            [    0,  pi/2],    # J4:  90° → 180°
+            [-pi/4, pi/4],     # J5:   0° →  45°
+            [-pi/2, pi/2]      # J6 (gripper) – kept for completeness, not used by IK
         ]
-        
-        # Save the dynamixel position limits and angle ranges for conversion
+
+        # Save Dynamixel ranges for later degree/step conversion
         self.joint_dxl_limits = [
             JOINT_1_LIMITS,
-            JOINT_2_LIMITS, 
+            JOINT_2_LIMITS,
             JOINT_3_LIMITS,
             JOINT_4_LIMITS,
             JOINT_5_LIMITS,
             JOINT_6_LIMITS
         ]
-        
-        # Center position (2048 in standard Dynamixel units)
+
+        # Dynamixel "center" (depends on model firmware; 2048 for XL‑series at 12‑bit)
         self.center_position = 2048
+
         
     def forward_kinematics(self, joint_angles):
         """Calculate the end-effector position given joint angles."""
@@ -215,6 +245,14 @@ class RobotArmIKPy:
             elif len(joint_angles) > 6:
                 joint_angles = joint_angles[:6]
             
+            # Print both raw angles and Dynamixel positions
+            print("\nRaw joint angles (IKPy coordinates):")
+            for i, angle in enumerate(joint_angles):
+                print(f"Joint {i+1}: {angle:.4f} rad ({degrees(angle):.2f}°)")
+            
+            # Calculate and print Dynamixel positions
+            dxl_positions = self.angles_to_dynamixel(joint_angles)
+            
             return joint_angles
         
         except Exception as e:
@@ -223,47 +261,57 @@ class RobotArmIKPy:
             return [0, 0, 0, 0, 0, 0]
 
     def angles_to_dynamixel(self, joint_angles):
-        """Convert joint angles in radians to Dynamixel position values using actual motor limits."""
+        """Convert joint angles in radians to Dynamixel position values."""
         dynamixel_positions = []
         
+        print("\nDynamixel angles (radians):")
         for i, angle in enumerate(joint_angles):
             # Get the limits for this joint
             min_pos, max_pos, min_deg, max_deg = self.joint_dxl_limits[i]
             
-            # Convert the angle from radians to degrees
+            # Convert angle to degrees
             angle_deg = degrees(angle)
             
-            # For joints 1-3, add 90 degrees to convert from [-90, 90] range to [0, 180]
-            # For joint 4, add 45 degrees to convert from [-45, 45] to [0, 90]
-            # For joint 5, add 22.5 degrees to convert from [-22.5, 22.5] to [0, 45]
-            # For joint 6, add 45 degrees to convert from [-45, 45] to [0, 90]
-            if i == 0 or i == 1 or i == 2:
-                angle_deg += 90
-            elif i == 3:
-                angle_deg += 45
-            elif i == 4:
-                angle_deg += 22.5
-            elif i == 5:
-                angle_deg += 45
+            # Transform angles to match Dynamixel coordinate system
+            if i == 0:  # Base
+                # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
+                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
+            elif i == 1:  # Shoulder
+                # IKPy: -90° to 90° -> Dynamixel: 140° to 270°
+                # Negative IKPy angle means bending backward
+                angle_deg = 270 + angle_deg  # Shift to match Dynamixel range
+            elif i == 2:  # Elbow
+                # IKPy: -90° to 90° -> Dynamixel: 180° to 270°
+                # Negative IKPy angle means bending backward
+                angle_deg = 180 + angle_deg  # Shift to match Dynamixel range
+            elif i == 3:  # Wrist rotation
+                # IKPy: -90° to 90° -> Dynamixel: 90° to 270°
+                # 0° in IKPy should be 90° in Dynamixel (pointing up)
+                angle_deg = 90 + angle_deg  # Shift to match Dynamixel range
+            elif i == 4:  # Wrist pitch
+                # IKPy: -45° to 45° -> Dynamixel: 0° to 45°
+                angle_deg = angle_deg  # Already in correct range
+            elif i == 5:  # Gripper
+                # IKPy: -90° to 90° -> Dynamixel: 0° to 90°
+                angle_deg = angle_deg  # Already in correct range
             
-            # Handle reversed range for joint 6 (gripper)
-            if i == 5 and min_deg > max_deg:
-                temp = min_deg
-                min_deg = max_deg
-                max_deg = temp
-                temp = min_pos
-                min_pos = max_pos
-                max_pos = temp
+            # Ensure angle is within Dynamixel range
+            if angle_deg < 0:
+                angle_deg += 360
+            elif angle_deg >= 360:
+                angle_deg -= 360
             
-            # Map the angle to dynamixel position
-            if max_deg == min_deg:
-                position = min_pos  # Prevent division by zero
-            else:
-                position = min_pos + (angle_deg - min_deg) * (max_pos - min_pos) / (max_deg - min_deg)
+            # Convert back to radians for printing
+            angle_rad = radians(angle_deg)
+            print(f"Joint {i+1}: {angle_rad:.4f} rad ({angle_deg:.2f}°)")
             
-            # Ensure position is within the valid range
-            position = int(round(max(min_pos, min(max_pos, position))))
+            # Map angle to Dynamixel position
+            pos_range = max_pos - min_pos
+            angle_range = max_deg - min_deg
+            position = min_pos + int((angle_deg - min_deg) * pos_range / angle_range)
             
+            # Ensure position is within limits
+            position = max(min_pos, min(max_pos, position))
             dynamixel_positions.append(position)
         
         return dynamixel_positions
@@ -364,6 +412,11 @@ class RobotArmIKPy:
             
             # Set reasonable viewpoint
             ax.view_init(elev=30, azim=45)
+            
+            # Print the raw angles for debugging
+            print("\nRaw joint angles (radians):")
+            for i, angle in enumerate(joint_angles):
+                print(f"Joint {i+1}: {angle:.4f} rad ({degrees(angle):.2f}°)")
             
         except Exception as e:
             print(f"Error plotting arm: {e}")
