@@ -17,7 +17,7 @@ from computer_vision.final_detection_realtime import stablized_centers
 import socket
 
 class SO100IKControl:
-    def __init__(self, port='/dev/tty.usbserial-59100209741', baudrate=115200):
+    def __init__(self, port='COM14', baudrate=115200):
         """Initialize the SO100 IK control system."""
         self.arm = SO100Arm()
         self.serial = None
