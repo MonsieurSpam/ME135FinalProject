@@ -12,7 +12,9 @@ import numpy as np
 from so100_ikpy_model import SO100Arm
 from math import degrees
 import argparse
-import matplotlib.pyplot as plt
+import matplotlib.pyplot as plt 
+from computer_vision.final_detection_realtime import stablized_centers
+import socket
 
 class SO100IKControl:
     def __init__(self, port='/dev/tty.usbserial-59100209741', baudrate=115200):
@@ -301,57 +303,103 @@ class SO100IKControl:
 
 def main():
     parser = argparse.ArgumentParser(description='SO100 Arm Control')
-    parser.add_argument('--mode', choices=['move', 'pickplace'], required=True,
-                      help='Mode: "move" for direct IK movement, "pickplace" for pick and place sequence')
+    parser.add_argument('--mode', choices=['move', 'pickplace', 'server'], required=True,
+                      help='Mode: "move" for direct IK movement, "pickplace" for pick and place sequence, "server" for UDP server mode')
     parser.add_argument('--x', type=float, help='X coordinate in meters')
     parser.add_argument('--y', type=float, help='Y coordinate in meters')
     parser.add_argument('--z', type=float, help='Z coordinate in meters')
-    parser.add_argument('--pick-x', type=float, help='Pick X coordinate in meters')
-    parser.add_argument('--pick-y', type=float, help='Pick Y coordinate in meters')
-    parser.add_argument('--pick-z', type=float, help='Pick Z coordinate in meters')
-    parser.add_argument('--place-x', type=float, help='Place X coordinate in meters')
-    parser.add_argument('--place-y', type=float, help='Place Y coordinate in meters')
-    parser.add_argument('--place-z', type=float, help='Place Z coordinate in meters')
-    
+    parser.add_argument('--pick-x', type=float, default=0.12, help='Pick X coordinate in meters')
+    parser.add_argument('--pick-y', type=float, default=0.09, help='Pick Y coordinate in meters')
+    parser.add_argument('--pick-z', type=float, default=0.15, help='Pick Z coordinate in meters')
+    parser.add_argument('--place-x', type=float, default=0.12, help='Place X coordinate in meters')
+    parser.add_argument('--place-y', type=float, default=-0.09, help='Place Y coordinate in meters')
+    parser.add_argument('--place-z', type=float, default=0.15, help='Place Z coordinate in meters')
+    parser.add_argument('--host', type=str, default='127.0.0.1', help='UDP server host')
+    parser.add_argument('--port', type=int, default=4700, help='UDP server port')
+
     args = parser.parse_args()
     
-    with SO100IKControl() as arm_control:
-        if args.mode == 'move':
-            if args.x is None or args.y is None or args.z is None:
-                print("Error: X, Y, and Z coordinates are required for move mode")
-                return
+    pick_position = [args.pick_x, args.pick_y, args.pick_z]
+    place_position = [args.place_x, args.place_y, args.place_z]
+
+    if args.mode == 'server':
+        # Initialize UDP server
+        sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        sock.bind((args.host, args.port))
+        print(f"🔴 UDP server listening on {args.host}:{args.port}...")
+
+        last_command = None
+        arm_control = SO100IKControl()
+        
+        try:
+            while True:
+                data, addr = sock.recvfrom(1024)
+                command = data.decode().strip()
+
+                if command and command != last_command:
+                    print(f"✅ New command received: {command}")
+
+                    if command == "red":
+                        print("🟥 Moving to RED cube!")
+                        pick_position = stablized_centers(override_color='red')
+                        place_position = [args.place_x, args.place_y, args.place_z]
+                    elif command == "blue":
+                        print("🟦 Moving to BLUE cube!")
+                        pick_position = stablized_centers(override_color='blue')
+                        place_position = [args.place_x, args.place_y, args.place_z]
+                    elif command == "start":
+                        print("🟦 Moving to start position!")
+                        arm_control.execute_pick_and_place(pick_position, place_position)
+                    else:
+                        print("⚠️ Unknown command")
+
+                    last_command = command
+
+        except KeyboardInterrupt:
+            print("\n🚪 Exiting on Ctrl+C...")
+        finally:
+            sock.close()
+            arm_control.disconnect()
+
+    else:
+        # Original command-line mode
+        pick_position = stablized_centers(override_color='red') 
+        place_position = [args.place_x, args.place_y, args.place_z]
+        
+        with SO100IKControl() as arm_control:
+            if args.mode == 'move':
+                if args.x is None or args.y is None or args.z is None:
+                    print("Error: X, Y, and Z coordinates are required for move mode")
+                    return
+                    
+                target_position = [args.x, args.y, args.z]
+                target_orientation = np.array([[0, 0, 1],
+                                             [0, 1, 0],
+                                             [-1, 0, 0]])  # Gripper pointing downward
                 
-            target_position = [args.x, args.y, args.z]
-            target_orientation = np.array([[0, 0, 1],
-                                         [0, 1, 0],
-                                         [-1, 0, 0]])  # Gripper pointing downward
-            
-            print(f"Moving to position: {target_position}")
-            success = arm_control.move_to_position(target_position, target_orientation)
-            
-            if success:
-                print("Movement completed successfully!")
-            else:
-                print("Movement failed!")
+                print(f"Moving to position: {target_position}")
+                success = arm_control.move_to_position(target_position, target_orientation)
                 
-        elif args.mode == 'pickplace':
-            if (args.pick_x is None or args.pick_y is None or args.pick_z is None or
-                args.place_x is None or args.place_y is None or args.place_z is None):
-                print("Error: Pick and place coordinates are required for pickplace mode")
-                return
+                if success:
+                    print("Movement completed successfully!")
+                else:
+                    print("Movement failed!")
+                    
+            elif args.mode == 'pickplace':
+                if (args.pick_x is None or args.pick_y is None or args.pick_z is None or
+                    args.place_x is None or args.place_y is None or args.place_z is None):
+                    print("Error: Pick and place coordinates are required for pickplace mode")
+                    return
+                    
+                print(f"Pick position: {pick_position}")
+                print(f"Place position: {place_position}")
                 
-            pick_position = [args.pick_x, args.pick_y, args.pick_z]
-            place_position = [args.place_x, args.place_y, args.place_z]
-            
-            print(f"Pick position: {pick_position}")
-            print(f"Place position: {place_position}")
-            
-            success = arm_control.execute_pick_and_place(pick_position, place_position)
-            
-            if success:
-                print("Pick and place sequence completed successfully!")
-            else:
-                print("Pick and place sequence failed!")
+                success = arm_control.execute_pick_and_place(pick_position, place_position)
+                
+                if success:
+                    print("Pick and place sequence completed successfully!")
+                else:
+                    print("Pick and place sequence failed!")
 
 if __name__ == "__main__":
     main() 
