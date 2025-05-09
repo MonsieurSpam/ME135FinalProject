@@ -6,10 +6,14 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PySide6.QtCore import Slot, Qt, QProcess
 from PySide6.QtGui import QColor, QTextCursor
 import serial.tools.list_ports
+import serial
 
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
+        
+        # Initialize serial connection
+        self.serial_connection = None
         
         # Set window properties
         self.setWindowTitle("ME135 Control Panel")
@@ -420,33 +424,88 @@ class MainWindow(QMainWindow):
         self.find_red.clicked.connect(lambda: self.execute_command("find_red"))
         self.find_blue.clicked.connect(lambda: self.execute_command("find_blue"))
         self.pick_place.clicked.connect(lambda: self.execute_command("pick_and_place"))
-        self.home_button.clicked.connect(lambda: self.execute_command("return_home"))
-        self.demo_button.clicked.connect(lambda: self.execute_command("run_demo"))
+        self.home_button.clicked.connect(lambda: self.send_serial_command("C"))
+        self.demo_button.clicked.connect(lambda: self.send_serial_command("d"))
 
     
     @Slot(int)
     def toggle_mode(self, value):
         """Toggle between teleop and auto modes"""
-        if value == 1:
+        if value == 1:  # Auto mode
             self.mode_display.setText("Auto")
             self.console_output.append("Mode changed to: Auto")
-        else:
+            
+            # Disable teleop controls (left section)
+            self.gripper_button.setEnabled(False)
+            for slider, _ in self.joint_sliders:
+                slider.setEnabled(False)
+            
+            # Enable auto controls (right section)
+            self.find_red.setEnabled(True)
+            self.find_blue.setEnabled(True)
+            self.pick_place.setEnabled(True)
+            self.x_coord.setEnabled(True)
+            self.y_coord.setEnabled(True)
+            self.z_coord.setEnabled(True)
+            
+        else:  # Teleop mode
             self.mode_display.setText("Teleop")
             self.console_output.append("Mode changed to: Teleop")
+            
+            # Enable teleop controls (left section)
+            self.gripper_button.setEnabled(True)
+            for slider, _ in self.joint_sliders:
+                slider.setEnabled(True)
+            
+            # Disable auto controls (right section)
+            self.find_red.setEnabled(False)
+            self.find_blue.setEnabled(False)
+            self.pick_place.setEnabled(False)
+            self.x_coord.setEnabled(False)
+            self.y_coord.setEnabled(False)
+            self.z_coord.setEnabled(False)
     
     @Slot(str)
     def port_changed(self, port):
         """Handle port selection change"""
         self.port_display.setText(port)
-        self.connection_status.setStyleSheet("""
-            QFrame {
-                background-color: green;
-                border-radius: 30px;
-                border: 2px solid #666;
-            }
-        """)
-        if hasattr(self, 'console_output'):
-            self.console_output.append(f"Connected to port: {port}")
+        
+        # Close existing connection if any
+        if self.serial_connection and self.serial_connection.is_open:
+            self.serial_connection.close()
+            self.serial_connection = None
+        
+        try:
+            # Create new serial connection
+            self.serial_connection = serial.Serial(
+                port=port,
+                baudrate=115200,
+                timeout=1
+            )
+            
+            # Update connection status
+            self.connection_status.setStyleSheet("""
+                QFrame {
+                    background-color: green;
+                    border-radius: 30px;
+                    border: 2px solid #666;
+                }
+            """)
+            if hasattr(self, 'console_output'):
+                self.console_output.append(f"Connected to port: {port}")
+                
+        except Exception as e:
+            # Update connection status to indicate error
+            self.connection_status.setStyleSheet("""
+                QFrame {
+                    background-color: red;
+                    border-radius: 30px;
+                    border: 2px solid #666;
+                }
+            """)
+            if hasattr(self, 'console_output'):
+                self.console_output.append(f"Error connecting to port {port}: {str(e)}")
+            self.serial_connection = None
     
     @Slot(int, int)
     def update_joint_angle(self, joint_index, value):
@@ -458,11 +517,13 @@ class MainWindow(QMainWindow):
     @Slot()
     def toggle_gripper(self):
         """Toggle gripper state"""
-        if self.gripper_button.isChecked():
+        if self.gripper_button.isChecked(): 
+            self.send_serial_command("G")
             self.gripper_button.setText("Gripper: Closed")
             self.gripper_status.setText("Closed")
             self.console_output.append("Gripper closed")
         else:
+            self.send_serial_command("O")
             self.gripper_button.setText("Gripper: Open")
             self.gripper_status.setText("Open")
             self.console_output.append("Gripper opened")
@@ -491,6 +552,27 @@ class MainWindow(QMainWindow):
             self.port_selector.addItems(port_list)
         else:
             self.port_selector.addItem("No ports found")
+
+    def send_serial_command(self, command):
+        """Send a command over the serial connection"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self.console_output.append("Error: Not connected to any port")
+            return False
+            
+        try:
+            # Ensure command ends with newline
+            if not command.endswith('\n'):
+                command += '\n'
+                
+            # Send the command
+            self.serial_connection.write(command.encode('utf-8'))
+            self.serial_connection.flush()
+            self.console_output.append(f"Sent command: {command.strip()}")
+            return True
+            
+        except Exception as e:
+            self.console_output.append(f"Error sending command: {str(e)}")
+            return False
 
 def main():
     # Create the Qt Application
