@@ -254,14 +254,22 @@ class MainWindow(QMainWindow):
         # Add joint angle sliders
         self.joint_sliders = []
         joint_names = ["Base", "Shoulder", "Elbow", "Wrist"]
-        for name in joint_names:
+        joint_ranges = [
+            (90, 270),   # Base: 90 to 270
+            (140, 270),  # Shoulder: 140 to 270
+            (90, 270),   # Elbow: 90 to 270
+            (90, 270)    # Wrist: 90 to 270
+        ]
+        initial_positions = [180, 160, 180, 270]  # Initial positions for each joint
+        
+        for i, (name, (min_val, max_val), init_pos) in enumerate(zip(joint_names, joint_ranges, initial_positions)):
             slider_layout = QVBoxLayout()
             label = QLabel(f"{name} Joint")
             slider = QSlider(Qt.Horizontal)
-            slider.setMinimum(0)
-            slider.setMaximum(180)  # Assuming 0-180 degree range
-            slider.setValue(90)  # Start at middle position
-            value_label = QLabel("90°")
+            slider.setMinimum(min_val)
+            slider.setMaximum(max_val)
+            slider.setValue(init_pos)  # Set initial position
+            value_label = QLabel(f"{init_pos}°")
             value_label.setAlignment(Qt.AlignCenter)
             
             slider_layout.addWidget(label)
@@ -281,13 +289,13 @@ class MainWindow(QMainWindow):
         
         # Joint angle displays
         self.joint_displays = []
-        for name in joint_names:
+        for name, (min_val, max_val), init_pos in zip(joint_names, joint_ranges, initial_positions):
             display_layout = QHBoxLayout()
             label = QLabel(f"{name}:")
             display = QLineEdit()
             display.setReadOnly(True)
             display.setAlignment(Qt.AlignCenter)
-            display.setText("90°")
+            display.setText(f"{init_pos}°")
             display.setStyleSheet(text_box_style)
             display_layout.addWidget(label)
             display_layout.addWidget(display)
