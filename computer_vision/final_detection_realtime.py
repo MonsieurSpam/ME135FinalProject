@@ -78,6 +78,10 @@ def main(config, override_color=None):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Could not open camera.")
+    
+    # Set camera resolution to 640x480
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
 
     print("Press 'q' to quit.")
     while True:
@@ -116,6 +120,10 @@ def stablized_centers(config=CONFIG, override_color=None):
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
         raise RuntimeError("Could not open camera.")
+    
+    # Set camera resolution to 640x480
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
     
     world_coords_list = []
     print("Running stabilization...")
@@ -157,7 +165,7 @@ def stablized_centers(config=CONFIG, override_color=None):
 
 # ==== RUN ====
 if __name__ == "__main__":
-    color = "blue"  # Change to 'blue' if needed
+    color = "red"  # Change to 'blue' if needed
     
     coords = stablized_centers(override_color=color)
     if coords is not None:
