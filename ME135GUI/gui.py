@@ -303,11 +303,14 @@ class MainWindow(QMainWindow):
         status_layout.addLayout(gripper_layout)
         
         # Add stretch to push Home button to the bottom
-        status_layout.addStretch(1)
         # Add Home button at the bottom
         self.home_button = QPushButton("Home")
         self.home_button.setStyleSheet(button_style)
         status_layout.addWidget(self.home_button)
+
+        self.demo_button = QPushButton("Run Demo Sequence")
+        self.demo_button.setStyleSheet(button_style)
+        status_layout.addWidget(self.demo_button)
         
         middle_layout.addWidget(status_group, 1)  # Add stretch factor of 1
         
@@ -418,6 +421,8 @@ class MainWindow(QMainWindow):
         self.find_blue.clicked.connect(lambda: self.execute_command("find_blue"))
         self.pick_place.clicked.connect(lambda: self.execute_command("pick_and_place"))
         self.home_button.clicked.connect(lambda: self.execute_command("return_home"))
+        self.demo_button.clicked.connect(lambda: self.execute_command("run_demo"))
+
     
     @Slot(int)
     def toggle_mode(self, value):
