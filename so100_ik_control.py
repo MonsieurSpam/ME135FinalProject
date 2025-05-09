@@ -17,7 +17,7 @@ from computer_vision.final_detection_realtime import stablized_centers
 import socket
 
 class SO100IKControl:
-    def __init__(self, port='/dev/tty.usbserial-59100209741', baudrate=115200):
+    def __init__(self, port='COM9', baudrate=115200):
         """Initialize the SO100 IK control system."""
         self.arm = SO100Arm()
         self.serial = None
@@ -311,9 +311,9 @@ def main():
     parser.add_argument('--pick-x', type=float, default=0.12, help='Pick X coordinate in meters')
     parser.add_argument('--pick-y', type=float, default=0.09, help='Pick Y coordinate in meters')
     parser.add_argument('--pick-z', type=float, default=0.15, help='Pick Z coordinate in meters')
-    parser.add_argument('--place-x', type=float, default=0.12, help='Place X coordinate in meters')
+    parser.add_argument('--place-x', type=float, default=0.09, help='Place X coordinate in meters')
     parser.add_argument('--place-y', type=float, default=-0.09, help='Place Y coordinate in meters')
-    parser.add_argument('--place-z', type=float, default=0.15, help='Place Z coordinate in meters')
+    parser.add_argument('--place-z', type=float, default=0.1, help='Place Z coordinate in meters')
     parser.add_argument('--host', type=str, default='127.0.0.1', help='UDP server host')
     parser.add_argument('--port', type=int, default=4700, help='UDP server port')
 
@@ -363,7 +363,12 @@ def main():
 
     else:
         # Original command-line mode
-        pick_position = stablized_centers(override_color='red') 
+        pick_position = stablized_centers(override_color='blue') 
+        pick_position[0] = pick_position[0] - 0.01  # Adjust X position for pick
+        pick_position[1] = pick_position[1] + 0.02  # Adjust Y position for pick
+        pick_position[2] = pick_position[2] + 0.05  # Adjust Z position for pick
+        
+        
         place_position = [args.place_x, args.place_y, args.place_z]
         
         with SO100IKControl() as arm_control:
