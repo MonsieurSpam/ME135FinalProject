@@ -5,6 +5,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QSlider, QGroupBox, QSpacerItem, QSizePolicy)
 from PySide6.QtCore import Slot, Qt, QProcess
 from PySide6.QtGui import QColor, QTextCursor
+import serial.tools.list_ports
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -51,6 +52,20 @@ class MainWindow(QMainWindow):
             }
         """
         
+        # Style for action buttons (moved up so it's available for all buttons)
+        button_style = """
+            QPushButton {
+                padding: 10px;
+                background-color: #4a86e8;
+                color: white;
+                border-radius: 5px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #5c9ce6;
+            }
+        """
+        
         # Connection Status Group
         connection_group = QGroupBox()
         connection_group.setStyleSheet(group_style)
@@ -89,7 +104,6 @@ class MainWindow(QMainWindow):
         port_layout.addWidget(self.port_display)
         
         self.port_selector = QComboBox()
-        self.port_selector.addItems(["COM1", "COM2", "COM3", "COM4", "COM5"])
         self.port_selector.setFixedHeight(25)
         self.port_selector.setStyleSheet("""
             QComboBox {
@@ -109,6 +123,7 @@ class MainWindow(QMainWindow):
         """)
         self.port_selector.currentTextChanged.connect(self.port_changed)
         port_layout.addWidget(self.port_selector)
+        self.scan_ports()
         control_layout.addWidget(port_group, 1)  # Add stretch factor of 1
         
         # Mode Switch Group
@@ -179,7 +194,26 @@ class MainWindow(QMainWindow):
         # Add control panel to main layout
         main_layout.addWidget(control_panel)
         
-        # Create middle section (three columns)
+        # Create console output section EARLY so self.console_output exists before scan_ports/port_changed
+        console_group = QGroupBox("Console Output")
+        console_group.setStyleSheet(group_style)
+        console_layout = QVBoxLayout(console_group)
+        self.console_output = QTextEdit()
+        self.console_output.setReadOnly(True)
+        self.console_output.setStyleSheet("""
+            QTextEdit {
+                background-color: #1e1e1e;
+                color: #ffffff;
+                font-family: 'Consolas', 'Monaco', monospace;
+                font-size: 12px;
+                padding: 5px;
+                border: 1px solid #333333;
+                border-radius: 3px;
+            }
+        """)
+        console_layout.addWidget(self.console_output)
+        
+        # Add middle section (three columns)
         middle_section = QWidget()
         middle_layout = QHBoxLayout(middle_section)
         middle_layout.setSpacing(20)
@@ -268,6 +302,13 @@ class MainWindow(QMainWindow):
         gripper_layout.addWidget(self.gripper_status)
         status_layout.addLayout(gripper_layout)
         
+        # Add stretch to push Home button to the bottom
+        status_layout.addStretch(1)
+        # Add Home button at the bottom
+        self.home_button = QPushButton("Home")
+        self.home_button.setStyleSheet(button_style)
+        status_layout.addWidget(self.home_button)
+        
         middle_layout.addWidget(status_group, 1)  # Add stretch factor of 1
         
         # Right column - Action Buttons
@@ -333,20 +374,6 @@ class MainWindow(QMainWindow):
         self.find_blue = QPushButton("Find Blue")
         self.pick_place = QPushButton("Execute Pick and Place")
         
-        # Style for action buttons
-        button_style = """
-            QPushButton {
-                padding: 10px;
-                background-color: #4a86e8;
-                color: white;
-                border-radius: 5px;
-                font-weight: bold;
-            }
-            QPushButton:hover {
-                background-color: #5c9ce6;
-            }
-        """
-        
         self.find_red.setStyleSheet(button_style)
         self.find_blue.setStyleSheet(button_style)
         self.pick_place.setStyleSheet(button_style)
@@ -359,29 +386,7 @@ class MainWindow(QMainWindow):
         
         # Add middle section to main layout
         main_layout.addWidget(middle_section)
-        
-        # Create console output section
-        console_group = QGroupBox("Console Output")
-        console_group.setStyleSheet(group_style)
-        console_layout = QVBoxLayout(console_group)
-        
-        # Console output
-        self.console_output = QTextEdit()
-        self.console_output.setReadOnly(True)
-        self.console_output.setStyleSheet("""
-            QTextEdit {
-                background-color: #1e1e1e;
-                color: #ffffff;
-                font-family: 'Consolas', 'Monaco', monospace;
-                font-size: 12px;
-                padding: 5px;
-                border: 1px solid #333333;
-                border-radius: 3px;
-            }
-        """)
-        console_layout.addWidget(self.console_output)
-        
-        # Add console section to main layout
+        # Add console section to main layout (now at the bottom)
         main_layout.addWidget(console_group)
         
         # Initialize process for command execution
@@ -412,6 +417,7 @@ class MainWindow(QMainWindow):
         self.find_red.clicked.connect(lambda: self.execute_command("find_red"))
         self.find_blue.clicked.connect(lambda: self.execute_command("find_blue"))
         self.pick_place.clicked.connect(lambda: self.execute_command("pick_and_place"))
+        self.home_button.clicked.connect(lambda: self.execute_command("return_home"))
     
     @Slot(int)
     def toggle_mode(self, value):
@@ -434,7 +440,8 @@ class MainWindow(QMainWindow):
                 border: 2px solid #666;
             }
         """)
-        self.console_output.append(f"Connected to port: {port}")
+        if hasattr(self, 'console_output'):
+            self.console_output.append(f"Connected to port: {port}")
     
     @Slot(int, int)
     def update_joint_angle(self, joint_index, value):
@@ -469,6 +476,16 @@ class MainWindow(QMainWindow):
         """Execute a system command and display output in console"""
         self.console_output.append(f"> {command}")
         self.process.start(command)
+    
+    def scan_ports(self):
+        """Scan for available serial ports and update the dropdown menu."""
+        ports = serial.tools.list_ports.comports()
+        port_list = [port.device for port in ports]
+        self.port_selector.clear()
+        if port_list:
+            self.port_selector.addItems(port_list)
+        else:
+            self.port_selector.addItem("No ports found")
 
 def main():
     # Create the Qt Application
