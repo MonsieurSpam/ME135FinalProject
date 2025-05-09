@@ -7,6 +7,7 @@ from PySide6.QtCore import Slot, Qt, QProcess
 from PySide6.QtGui import QColor, QTextCursor
 import serial.tools.list_ports
 import serial
+import math
 
 class MainWindow(QMainWindow):
     def __init__(self):
@@ -515,12 +516,47 @@ class MainWindow(QMainWindow):
                 self.console_output.append(f"Error connecting to port {port}: {str(e)}")
             self.serial_connection = None
     
+    def convert_to_dynamixel_angle(self, joint_index, angle):
+        """Convert joint angle to Dynamixel angle format"""
+        # Convert from GUI angle to Dynamixel angle
+        if joint_index == 0:  # Base
+            angle_deg = 180 + angle  # Shift to match Dynamixel range
+        elif joint_index == 1:  # Shoulder
+            angle_deg = 270 + angle  # Shift to match Dynamixel range
+        elif joint_index == 2:  # Elbow
+            angle_deg = 90 + angle  # Shift to match Dynamixel range
+        elif joint_index == 3:  # Wrist
+            angle_deg = 90 + angle  # Shift to match Dynamixel range
+        
+        # Ensure angle is within 0-360° range
+        while angle_deg < 0:
+            angle_deg += 360
+        while angle_deg >= 360:
+            angle_deg -= 360
+            
+        return angle_deg
+
     @Slot(int, int)
     def update_joint_angle(self, joint_index, value):
         """Update joint angle display when slider changes"""
         self.joint_sliders[joint_index][1].setText(f"{value}°")
         self.joint_displays[joint_index].setText(f"{value}°")
         self.console_output.append(f"Joint {joint_index + 1} angle changed to {value}°")
+        
+        # Get all current joint angles
+        angles = [slider.value() for slider, _ in self.joint_sliders[:4]]  # Only first 4 joints
+        
+        # Format and send the I command
+        angles_str = ','.join([f"{angle:.2f}" for angle in angles])
+        cmd = f"I{angles_str}\n"
+        
+        if self.serial_connection and self.serial_connection.is_open:
+            try:
+                self.serial_connection.write(cmd.encode())
+                self.serial_connection.flush()
+                self.console_output.append(f"Sent command: {cmd.strip()}")
+            except Exception as e:
+                self.console_output.append(f"Error sending command: {str(e)}")
     
     @Slot()
     def toggle_gripper(self):
