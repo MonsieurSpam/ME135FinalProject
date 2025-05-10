@@ -26,6 +26,7 @@
 #include "freertos/queue.h"
 #include "state_machine.h"
 #include "motor_parameters.h"
+#include "esp_timer.h"
 
 #define TAG "DXL_EXAMPLE"
 
@@ -48,6 +49,9 @@
 #define USER_INPUT_STACK_SIZE 8192
 #define USER_INPUT_PRIORITY 6
 #define USER_INPUT_PERIOD_MS 10
+#define POSITION_REPORT_STACK_SIZE 4096
+#define POSITION_REPORT_PRIORITY 4
+#define POSITION_REPORT_PERIOD_US 100000  // 100ms in microseconds
 
 // Add these constants near the top with other constants
 #define DEMO_POSITION_DELAY_MS 4000  // Time to hold each position (4 seconds)
@@ -681,6 +685,43 @@ static void dxl_control_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
+// Add before app_main
+static void position_report_callback(void* arg)
+{
+    // Read and send positions for all servos
+    printf("J");  // 'J' prefix for joint positions
+    
+    for (int i = 1; i <= 6; i++) {
+        int32_t position;
+        if (state_machine_get_position(i, &position)) {
+            printf("%" PRId32, position);
+        } else {
+            printf("2048"); // Use default if read fails
+        }
+        
+        // Add comma except for the last item
+        if (i < 6) {
+            printf(",");
+        }
+    }
+    
+    printf("\n");
+}
+
+static void init_position_reporting(void)
+{
+    esp_timer_handle_t timer_handle;
+    
+    esp_timer_create_args_t timer_args = {
+        .callback = position_report_callback,
+        .name = "position_report",
+        .dispatch_method = ESP_TIMER_TASK
+    };
+    
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &timer_handle));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(timer_handle, POSITION_REPORT_PERIOD_US));
+}
+
 void app_main(void)
 {
     // Initialize NVS
@@ -705,5 +746,8 @@ void app_main(void)
     // Create tasks with adjusted priorities and stack sizes
     xTaskCreate(user_input_task, "user_input", USER_INPUT_STACK_SIZE, NULL, USER_INPUT_PRIORITY, NULL);
     xTaskCreate(dxl_control_task, "dxl_control", POSITION_CONTROL_STACK_SIZE, NULL, POSITION_CONTROL_PRIORITY, NULL);
+    
+    // Initialize position reporting using esp_timer
+    init_position_reporting();
 }
 
