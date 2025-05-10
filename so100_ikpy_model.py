@@ -107,7 +107,7 @@ class SO100Arm:
         min_height = 0.02  # Minimum height in meters
         if target_position[2] < min_height:
             print(f"Warning: Target height {target_position[2]}m is below minimum {min_height}m")
-            target_position = [target_position[0], target_position[1], min_height]
+            return None  # Return None to indicate no valid solution
         
         best_error = float('inf')
         best_angles = None
@@ -220,7 +220,7 @@ class SO100Arm:
             return best_angles
         else:
             print("Error: Could not find a solution within tolerance")
-            return [0, 0, 0, 0, 0]
+            return None  # Return None to indicate no valid solution
 
     def visualize(self, joint_angles, target_position=None):
         """Visualize the robot arm configuration in 3D."""

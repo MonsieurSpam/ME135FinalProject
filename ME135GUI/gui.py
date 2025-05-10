@@ -4,7 +4,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
                              QLineEdit, QMessageBox, QComboBox, QFrame,
                              QSlider, QGroupBox, QSpacerItem, QSizePolicy)
-from PySide6.QtCore import Slot, Qt, QProcess, QTimer, QDateTime
+from PySide6.QtCore import Slot, Qt, QProcess, QTimer, QDateTime, QThread
 from PySide6.QtGui import QColor, QTextCursor
 import serial.tools.list_ports
 import serial
@@ -29,6 +29,7 @@ class MainWindow(QMainWindow):
         # Store detected positions
         self.detected_red_position = None
         self.detected_blue_position = None
+        self.last_detected_color = None  # Track which color was last detected
         
         # Initialize position reading timer
         self.position_timer = QTimer()
@@ -45,6 +46,15 @@ class MainWindow(QMainWindow):
         
         # Track last position update time
         self.last_position_update = QDateTime.currentMSecsSinceEpoch()
+        
+        # Add connection state tracking
+        self.connection_state = "disconnected"  # Can be: disconnected, connecting, connected
+        self.connection_attempts = 0
+        self.max_connection_attempts = 3
+        
+        # Add pick and place thread
+        self.pick_place_thread = None
+        self.pick_place_running = False
         
         # Set window properties
         self.setWindowTitle("ME135 Control Panel")
@@ -512,6 +522,7 @@ class MainWindow(QMainWindow):
             position[2] = position[2] + 0.05
             if position is not None:
                 self.detected_red_position = position
+                self.last_detected_color = 'red'  # Set last detected color to red
                 self.console_output.append(f"Red cube found at: {position}")
             else:
                 self.console_output.append("No red cube detected")
@@ -527,6 +538,7 @@ class MainWindow(QMainWindow):
             position[2] = position[2] + 0.05
             if position is not None:
                 self.detected_blue_position = position
+                self.last_detected_color = 'blue'  # Set last detected color to blue
                 self.console_output.append(f"Blue cube found at: {position}")
             else:
                 self.console_output.append("No blue cube detected")
@@ -537,6 +549,10 @@ class MainWindow(QMainWindow):
         """Execute pick and place sequence using detected position and user-specified place position"""
         if not self.serial_connection or not self.serial_connection.is_open:
             self.console_output.append("Error: Not connected to any port")
+            return
+
+        if self.pick_place_running:
+            self.console_output.append("Error: Pick and place operation already in progress")
             return
 
         try:
@@ -551,11 +567,11 @@ class MainWindow(QMainWindow):
 
             place_position = [place_x, place_y, place_z]
 
-            # Determine which cube to pick based on which was last detected
-            if self.detected_red_position is not None:
+            # Use the last detected color's position
+            if self.last_detected_color == 'red' and self.detected_red_position is not None:
                 pick_position = self.detected_red_position
                 self.console_output.append("Using red cube position for pick")
-            elif self.detected_blue_position is not None:
+            elif self.last_detected_color == 'blue' and self.detected_blue_position is not None:
                 pick_position = self.detected_blue_position
                 self.console_output.append("Using blue cube position for pick")
             else:
@@ -569,17 +585,36 @@ class MainWindow(QMainWindow):
                     self.console_output.append("Error: Failed to initialize IK control")
                     return
 
-            # Execute pick and place sequence
-            self.console_output.append("Executing pick and place sequence...")
-            success = self.ik_control.execute_pick_and_place(pick_position, place_position)
-            
-            if success:
-                self.console_output.append("Pick and place sequence completed successfully!")
-            else:
-                self.console_output.append("Pick and place sequence failed!")
+            # Create and start pick and place thread
+            self.pick_place_running = True
+            self.pick_place_thread = QThread()
+            self.pick_place_thread.run = lambda: self._run_pick_and_place(pick_position, place_position)
+            self.pick_place_thread.finished.connect(self._pick_and_place_finished)
+            self.pick_place_thread.start()
 
         except Exception as e:
             self.console_output.append(f"Error during pick and place: {str(e)}")
+            self.pick_place_running = False
+
+    def _run_pick_and_place(self, pick_position, place_position):
+        """Run pick and place sequence in a separate thread"""
+        try:
+            success = self.ik_control.execute_pick_and_place(pick_position, place_position)
+            if success:
+                self.console_output.append("Pick and place sequence completed successfully!")
+            else:
+                self.console_output.append("Pick and place sequence failed - no valid IK solution found!")
+        except Exception as e:
+            self.console_output.append(f"Error during pick and place: {str(e)}")
+        finally:
+            self.pick_place_running = False
+
+    def _pick_and_place_finished(self):
+        """Handle completion of pick and place operation"""
+        self.pick_place_running = False
+        if self.pick_place_thread:
+            self.pick_place_thread.deleteLater()
+            self.pick_place_thread = None
 
     @Slot(str)
     def port_changed(self, port):
@@ -612,7 +647,7 @@ class MainWindow(QMainWindow):
             self.last_connected_port = port
             
             # Start the connection timeout timer
-            self.connection_timeout.start(500)  # Check every 500ms
+            self.connection_timeout.start(2000)  # Check every 2 seconds
             
             # Update connection status
             self.connection_status.setStyleSheet("""
@@ -622,8 +657,6 @@ class MainWindow(QMainWindow):
                     border: 2px solid #666;
                 }
             """)
-            if hasattr(self, 'console_output'):
-                self.console_output.append(f"Connected to port: {port}")
                 
         except Exception as e:
             # Update connection status to indicate error
@@ -634,8 +667,6 @@ class MainWindow(QMainWindow):
                     border: 2px solid #666;
                 }
             """)
-            if hasattr(self, 'console_output'):
-                self.console_output.append(f"Error connecting to port {port}: {str(e)}")
             self.serial_connection = None
     
     def convert_to_dynamixel_angle(self, joint_index, angle):
@@ -743,32 +774,44 @@ class MainWindow(QMainWindow):
     def check_connection(self):
         """Check if we've received a position update recently"""
         current_time = QDateTime.currentMSecsSinceEpoch()
-        if current_time - self.last_position_update > 500:  # Changed from 200 to 500
-            # No position update received in the last 500ms
+        if current_time - self.last_position_update > 2000:  # 2 seconds timeout
+            if self.connection_state == "connected":
+                self.connection_state = "disconnected"
+                self.connection_status.setStyleSheet("""
+                    QFrame {
+                        background-color: red;
+                        border-radius: 30px;
+                        border: 2px solid #666;
+                    }
+                """)
+                if self.serial_connection and self.serial_connection.is_open:
+                    self.serial_connection.close()
+                    self.serial_connection = None
+                    # Stop the connection timeout timer
+                    self.connection_timeout.stop()
+                    # Start reconnection attempts
+                    if self.last_connected_port:
+                        self.connection_attempts = 0
+                        self.reconnect_timer.start(2000)  # Try to reconnect every 2 seconds
+
+    def attempt_reconnect(self):
+        """Attempt to reconnect to the last known port"""
+        if not self.last_connected_port or self.connection_attempts >= self.max_connection_attempts:
+            self.reconnect_timer.stop()
+            self.connection_state = "disconnected"
+            return
+            
+        try:
+            # Set connecting state
+            self.connection_state = "connecting"
             self.connection_status.setStyleSheet("""
                 QFrame {
-                    background-color: red;
+                    background-color: yellow;
                     border-radius: 30px;
                     border: 2px solid #666;
                 }
             """)
-            if self.serial_connection and self.serial_connection.is_open:
-                self.console_output.append("Connection lost - No position updates received")
-                self.serial_connection.close()
-                self.serial_connection = None
-                # Stop the connection timeout timer
-                self.connection_timeout.stop()
-                # Start reconnection attempts
-                if self.last_connected_port:
-                    self.reconnect_timer.start(1000)  # Try to reconnect every second
-
-    def attempt_reconnect(self):
-        """Attempt to reconnect to the last known port"""
-        if not self.last_connected_port:
-            self.reconnect_timer.stop()
-            return
             
-        try:
             # Try to create new serial connection
             self.serial_connection = serial.Serial(
                 port=self.last_connected_port,
@@ -778,15 +821,43 @@ class MainWindow(QMainWindow):
             
             # If successful, stop reconnection attempts and start connection monitoring
             self.reconnect_timer.stop()
-            self.connection_timeout.start(500)
-            self.console_output.append(f"Reconnected to port: {self.last_connected_port}")
+            self.connection_timeout.start(2000)
+            
+            # Clear any stale data in the buffer
+            self.serial_connection.reset_input_buffer()
+            self.serial_connection.reset_output_buffer()
+            
+            # Update connection status
+            self.connection_state = "connected"
+            self.connection_status.setStyleSheet("""
+                QFrame {
+                    background-color: green;
+                    border-radius: 30px;
+                    border: 2px solid #666;
+                }
+            """)
+            
+            # Reset connection attempts counter
+            self.connection_attempts = 0
             
         except Exception as e:
-            # Connection failed, keep trying
-            self.console_output.append(f"Reconnection attempt failed: {str(e)}")
+            # Connection failed, increment attempts
+            self.connection_attempts += 1
             if self.serial_connection:
                 self.serial_connection.close()
                 self.serial_connection = None
+            
+            # If we've reached max attempts, stop trying
+            if self.connection_attempts >= self.max_connection_attempts:
+                self.reconnect_timer.stop()
+                self.connection_state = "disconnected"
+                self.connection_status.setStyleSheet("""
+                    QFrame {
+                        background-color: red;
+                        border-radius: 30px;
+                        border: 2px solid #666;
+                    }
+                """)
 
     def read_positions(self):
         """Read current joint positions from serial buffer"""
@@ -796,42 +867,49 @@ class MainWindow(QMainWindow):
         try:
             # Read all available data
             while self.serial_connection.in_waiting:
-                line = self.serial_connection.readline().decode().strip()
-                
-                # Check if this is a joint position update (starts with 'J')
-                if line.startswith('J'):
-                    # Update last position update time
-                    self.last_position_update = QDateTime.currentMSecsSinceEpoch()
+                try:
+                    line = self.serial_connection.readline().decode().strip()
                     
-                    # Update connection status to connected
-                    self.connection_status.setStyleSheet("""
-                        QFrame {
-                            background-color: green;
-                            border-radius: 30px;
-                            border: 2px solid #666;
-                        }
-                    """)
-                    
-                    # Parse positions
-                    positions = line[1:].split(',')  # Remove 'J' prefix and split
-                    if len(positions) >= 6:  # We expect 6 positions
-                        # Convert positions to angles and update displays
-                        for i in range(4):  # First 4 are joint positions
-                            try:
-                                position = int(positions[i])
-                                # Convert from 0-4096 to degrees (assuming 0-360 mapping)
-                                angle = (position / 4096.0) * 360.0
-                                self.joint_displays[i].setText(f"{angle:.1f}°")
-                            except ValueError:
-                                continue
+                    # Check if this is a joint position update (starts with 'J')
+                    if line.startswith('J'):
+                        # Update last position update time
+                        self.last_position_update = QDateTime.currentMSecsSinceEpoch()
                         
-                        # Handle gripper position
-                        try:
-                            gripper_pos = int(positions[5])  # 6th position is gripper
-                            gripper_state = "Open" if gripper_pos > 2900 else "Closed"
-                            self.gripper_status.setText(gripper_state)
-                        except ValueError:
-                            pass
+                        # Update connection status to connected
+                        self.connection_status.setStyleSheet("""
+                            QFrame {
+                                background-color: green;
+                                border-radius: 30px;
+                                border: 2px solid #666;
+                            }
+                        """)
+                        
+                        # Parse positions
+                        positions = line[1:].split(',')  # Remove 'J' prefix and split
+                        if len(positions) >= 6:  # We expect 6 positions
+                            # Convert positions to angles and update displays
+                            for i in range(4):  # First 4 are joint positions
+                                try:
+                                    position = int(positions[i])
+                                    # Convert from 0-4096 to degrees (assuming 0-360 mapping)
+                                    angle = (position / 4096.0) * 360.0
+                                    self.joint_displays[i].setText(f"{angle:.1f}°")
+                                except ValueError:
+                                    continue
+                            
+                            # Handle gripper position
+                            try:
+                                gripper_pos = int(positions[5])  # 6th position is gripper
+                                gripper_state = "Open" if gripper_pos > 2900 else "Closed"
+                                self.gripper_status.setText(gripper_state)
+                            except ValueError:
+                                pass
+                except UnicodeDecodeError:
+                    # Skip invalid data
+                    continue
+                except Exception as e:
+                    # Skip any other errors in processing a single line
+                    continue
                             
         except Exception as e:
             # Only log the error if it's not a temporary connection issue

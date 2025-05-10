@@ -112,6 +112,7 @@ static struct {
 
 // Add after other global variables
 static QueueHandle_t position_report_queue = NULL;
+static TaskHandle_t position_report_task_handle = NULL;
 
 // Timer ISR - minimal, just notifies task
 static void IRAM_ATTR pid_timer_isr(void* arg) {
@@ -223,17 +224,7 @@ static void init_console(void)
 // Print the main menu
 static void print_main_menu()
 {
-    printf("\n\n===== Dynamixel Servo Control =====\n");
-    printf("Available commands:\n");
-    printf("SxPyyy - Set servo x to position yyy (e.g., S1P2048)\n");
-    printf("M2048,2048,2048,2048,2048,2048 - Move all servos to specified positions\n");
-    printf("C - Center all servos\n");
-    printf("R - Read all servo positions\n");
-    printf("d - Run arm demo sequence\n");
-    printf("Iangle1,angle2,angle3,angle4 - Move to joint angles\n");
-    printf("O - Open gripper\n");
-    printf("G - Close gripper\n");
-    printf("\nWaiting for commands...\n");
+    // Empty - no menu printing
 }
 
 // Process a command to set a single servo target position
@@ -245,16 +236,8 @@ static void process_servo_command(const char* cmd) {
     if (sscanf(cmd, "S%dP%d", &servo_id, &position) == 2) {
         if (servo_id >= 1 && servo_id <= 6 && position >= 0 && position <= 4095) {
             // Set the target position using state machine
-            if (state_machine_set_target(servo_id, position)) {
-                printf("OK\n");
-            } else {
-                printf("ERROR: Failed to set position\n");
-            }
-        } else {
-            printf("ERROR: Invalid servo ID or position value\n");
+            state_machine_set_target(servo_id, position);
         }
-    } else {
-        printf("ERROR: Invalid command format\n");
     }
 }
 
@@ -274,21 +257,14 @@ static void process_move_all_command(const char* cmd) {
     }
     
     if (count == 6) {
-        bool success = true;
         for (int i = 0; i < found_count && i < MAX_SERVOS; i++) {
-            if (!state_machine_set_target(servo_ids[i], positions[i])) {
-                success = false;
-            }
+            state_machine_set_target(servo_ids[i], positions[i]);
         }
-        printf(success ? "OK\n" : "ERROR: Failed to set some positions\n");
-    } else {
-        printf("ERROR: Expected 6 position values\n");
     }
 }
 
 // Process a command to center all servos
 static void process_center_command(void) {
-    bool success = true;
     for (int i = 0; i < found_count && i < MAX_SERVOS; i++) {
         uint8_t id = servo_ids[i];
         int32_t position;
@@ -318,40 +294,18 @@ static void process_center_command(void) {
                 break;
         }
         
-        if (!state_machine_set_target(id, position)) {
-            success = false;
-        }
+        state_machine_set_target(id, position);
     }
-    printf(success ? "OK\n" : "ERROR: Failed to center some servos\n");
 }
 
 // Process a command to read all servo positions
 static void process_read_command(void) {
-    printf("Positions: ");
-    
-    for (int i = 1; i <= 6; i++) {
-        int32_t position;
-        if (state_machine_get_position(i, &position)) {
-            printf("%" PRId32, position);
-        } else {
-            printf("2048"); // Use default if read fails
-        }
-        
-        // Add comma except for the last item
-        if (i < 6) {
-            printf(",");
-        }
-    }
-    
-    printf("\nOK\n");
+    // Empty - no position reading printing
 }
 
 // Add this function before the command processing section
 void run_arm_demo(void) {
-    ESP_LOGI(TAG, "Starting arm demo sequence");
-    
     // Position 1: Initial/Home position
-    ESP_LOGI(TAG, "Moving to home position");
     state_machine_set_target(1, DXL_CENTER_POSITION);  // Base centered
     state_machine_set_target(2, MOTOR2_INITIAL_POSITION); // Shoulder back
     state_machine_set_target(3, MOTOR3_INITIAL_POSITION); // Elbow centered
@@ -359,33 +313,28 @@ void run_arm_demo(void) {
     vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
     
     // Position 2: Arm extended forward
-    ESP_LOGI(TAG, "Moving to extended position");
     state_machine_set_target(2, 2200);  // Shoulder forward
     state_machine_set_target(3, 1800);  // Elbow slightly up
     state_machine_set_target(4, 1450);  // Wrist up
     vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
     
     // Position 3: Arm up and ready
-    ESP_LOGI(TAG, "Moving to ready position");
     state_machine_set_target(2, 2000);  // Shoulder centered
     state_machine_set_target(3, 2200);  // Elbow up
     state_machine_set_target(4, 2000);  // Wrist level
     vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
     
     // Position 4: Arm reaching down
-    ESP_LOGI(TAG, "Moving to reach down position");
     state_machine_set_target(2, 2300);  // Shoulder forward
     state_machine_set_target(3, 1500);  // Elbow down
     state_machine_set_target(4, 2500);  // Wrist down
     vTaskDelay(pdMS_TO_TICKS(DEMO_POSITION_DELAY_MS));
     
     // Return to home position
-    ESP_LOGI(TAG, "Returning to home position");
     state_machine_set_target(1, DXL_CENTER_POSITION);
     state_machine_set_target(2, MOTOR2_INITIAL_POSITION);
     state_machine_set_target(3, MOTOR3_INITIAL_POSITION);
     state_machine_set_target(4, MOTOR4_INITIAL_POSITION);
-    ESP_LOGI(TAG, "Demo sequence complete");
 }
 
 // Process IK command
@@ -519,21 +468,13 @@ static bool set_pwm_gradually(int8_t servo_id, int32_t target_pwm) {
 // Process a command to open the gripper
 static void process_gripper_open_command(void) {
     // Set PWM to open gripper
-    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_OPEN_PWM)) {
-        printf("ERROR: Failed to set PWM for opening\n");
-        return;
-    }
-    printf("OK\n");
+    dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_OPEN_PWM);
 }
 
 // Process a command to close the gripper
 static void process_gripper_close_command(void) {
     // Set PWM to close gripper
-    if (!dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_CLOSE_PWM)) {
-        printf("ERROR: Failed to set PWM for closing\n");
-        return;
-    }
-    printf("OK\n");
+    dxl_write_register(6, DXL_ADDR_GOAL_PWM, 2, GRIPPER_CLOSE_PWM);
 }
 
 // Update the process_command function
@@ -591,11 +532,6 @@ static void process_command(const char* cmd) {
 // User input task
 static void user_input_task(void *pvParameters)
 {
-    // Clear screen and show ready message
-    printf("\033[2J\033[H");
-    printf("\n\n=== SYSTEM READY ===\n");
-    print_main_menu();
-    
     // Buffer for commands
     char cmd_buffer[128];
     int cmd_pos = 0;
@@ -604,14 +540,11 @@ static void user_input_task(void *pvParameters)
         // Check for serial commands
         int ch = fgetc(stdin);
         if (ch != EOF) {
-            printf("%c", ch);
-            
             if (ch == '\n' || ch == '\r') {
                 if (cmd_pos > 0) {
                     cmd_buffer[cmd_pos] = '\0';
                     process_command(cmd_buffer);
                     cmd_pos = 0;
-                    printf("\nEnter command: ");
                 }
             } else if (cmd_pos < sizeof(cmd_buffer) - 1) {
                 cmd_buffer[cmd_pos++] = (char)ch;
@@ -749,46 +682,44 @@ static void dxl_control_task(void *pvParameters)
 // Position reporting task
 static void position_report_task(void* arg) {
     int32_t positions[MAX_SERVOS];
+    TickType_t last_wake_time = xTaskGetTickCount();
+    const TickType_t frequency = pdMS_TO_TICKS(100); // 100ms period
     
     while (1) {
-        if (xQueueReceive(position_report_queue, positions, portMAX_DELAY)) {
-            printf("J");  // 'J' prefix for joint positions
-            
-            for (int i = 0; i < found_count; i++) {
-                printf("%" PRId32, positions[i]);
-                if (i < found_count - 1) {
-                    printf(",");
-                }
-            }
-            printf("\n");
+        // Copy positions from shared buffer
+        portENTER_CRITICAL(&shared_positions.mutex);
+        for (int i = 0; i < found_count; i++) {
+            positions[i] = shared_positions.positions[i];
         }
+        portEXIT_CRITICAL(&shared_positions.mutex);
+        
+        // Print positions regardless of queue state
+        printf("J");  // 'J' prefix for joint positions
+        for (int i = 0; i < found_count; i++) {
+            printf("%" PRId32, positions[i]);
+            if (i < found_count - 1) {
+                printf(",");
+            }
+        }
+        printf("\n");
+        
+        // Ensure consistent timing
+        vTaskDelayUntil(&last_wake_time, frequency);
     }
 }
 
-// Update position reporting callback to use queue
+// Update position reporting callback to be simpler
 static void position_report_callback(void* arg) {
-    int32_t positions[MAX_SERVOS];
-    
-    // Copy positions from shared buffer
-    portENTER_CRITICAL(&shared_positions.mutex);
-    for (int i = 0; i < found_count; i++) {
-        positions[i] = shared_positions.positions[i];
+    // Just notify the task - actual position reading is done in the task
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(position_report_task_handle, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
     }
-    portEXIT_CRITICAL(&shared_positions.mutex);
-    
-    // Send to queue
-    xQueueSendFromISR(position_report_queue, positions, NULL);
 }
 
 static void init_position_reporting(void)
 {
-    // Create position report queue
-    position_report_queue = xQueueCreate(POSITION_REPORT_QUEUE_SIZE, sizeof(int32_t) * MAX_SERVOS);
-    if (position_report_queue == NULL) {
-        ESP_LOGE(TAG, "Failed to create position report queue");
-        return;
-    }
-    
     // Create position report task (no core pinning)
     BaseType_t ret = xTaskCreate(
         position_report_task,
@@ -796,7 +727,7 @@ static void init_position_reporting(void)
         POSITION_REPORT_STACK_SIZE,
         NULL,
         POSITION_REPORT_PRIORITY,
-        NULL
+        &position_report_task_handle  // Store the handle
     );
     
     if (ret != pdPASS) {
