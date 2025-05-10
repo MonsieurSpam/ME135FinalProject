@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
                              QLineEdit, QMessageBox, QComboBox, QFrame,
                              QSlider, QGroupBox, QSpacerItem, QSizePolicy)
-from PySide6.QtCore import Slot, Qt, QProcess
+from PySide6.QtCore import Slot, Qt, QProcess, QTimer
 from PySide6.QtGui import QColor, QTextCursor
 import serial.tools.list_ports
 import serial
@@ -15,6 +15,11 @@ class MainWindow(QMainWindow):
         
         # Initialize serial connection
         self.serial_connection = None
+        
+        # Initialize position reading timer
+        self.position_timer = QTimer()
+        self.position_timer.timeout.connect(self.read_positions)
+        self.position_timer.start(100)  # Read every 100ms
         
         # Set window properties
         self.setWindowTitle("ME135 Control Panel")
@@ -540,7 +545,7 @@ class MainWindow(QMainWindow):
     def update_joint_angle(self, joint_index, value):
         """Update joint angle display when slider changes"""
         self.joint_sliders[joint_index][1].setText(f"{value}°")
-        self.joint_displays[joint_index].setText(f"{value}°")
+        # Remove the joint display update since it's now handled by read_positions
         self.console_output.append(f"Joint {joint_index + 1} angle changed to {value}°")
         
         # Get all current joint angles
@@ -617,6 +622,42 @@ class MainWindow(QMainWindow):
         except Exception as e:
             self.console_output.append(f"Error sending command: {str(e)}")
             return False
+
+    def read_positions(self):
+        """Read current joint positions from serial buffer"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            return
+            
+        try:
+            # Read all available data
+            while self.serial_connection.in_waiting:
+                line = self.serial_connection.readline().decode().strip()
+                
+                # Check if this is a joint position update (starts with 'J')
+                if line.startswith('J'):
+                    # Parse positions
+                    positions = line[1:].split(',')  # Remove 'J' prefix and split
+                    if len(positions) >= 6:  # We expect 6 positions
+                        # Convert positions to angles and update displays
+                        for i in range(4):  # First 4 are joint positions
+                            try:
+                                position = int(positions[i])
+                                # Convert from 0-4096 to degrees (assuming 0-360 mapping)
+                                angle = (position / 4096.0) * 360.0
+                                self.joint_displays[i].setText(f"{angle:.1f}°")
+                            except ValueError:
+                                continue
+                        
+                        # Handle gripper position
+                        try:
+                            gripper_pos = int(positions[5])  # 6th position is gripper
+                            gripper_state = "Open" if gripper_pos > 2900 else "Closed"
+                            self.gripper_status.setText(gripper_state)
+                        except ValueError:
+                            pass
+                            
+        except Exception as e:
+            self.console_output.append(f"Error reading positions: {str(e)}")
 
 def main():
     # Create the Qt Application
