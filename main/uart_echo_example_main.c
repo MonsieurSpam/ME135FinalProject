@@ -13,6 +13,9 @@
 #include <math.h>
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include "freertos/queue.h"
+#include "freertos/portmacro.h"
+#include "freertos/portable.h"
 #include "esp_system.h"
 #include "esp_log.h"
 #include "nvs_flash.h"
@@ -23,10 +26,10 @@
 #include "driver/uart_vfs.h"
 #include "linenoise/linenoise.h"
 #include "dynamixel.h"
-#include "freertos/queue.h"
 #include "state_machine.h"
 #include "motor_parameters.h"
 #include "esp_timer.h"
+#include "esp_freertos_hooks.h"  // Add this for core affinity functions
 
 #define TAG "DXL_EXAMPLE"
 
@@ -52,6 +55,7 @@
 #define POSITION_REPORT_STACK_SIZE 4096
 #define POSITION_REPORT_PRIORITY 4
 #define POSITION_REPORT_PERIOD_US 100000  // 100ms in microseconds
+#define POSITION_REPORT_QUEUE_SIZE 10
 
 // Add these constants near the top with other constants
 #define DEMO_POSITION_DELAY_MS 4000  // Time to hold each position (4 seconds)
@@ -74,16 +78,108 @@
 #define GRIPPER_PWM_RAMP_STEPS 10    // Number of steps for PWM ramping
 #define GRIPPER_PWM_RAMP_DELAY_MS 100 // Delay between PWM steps
 
+// Add after other defines
+#define PID_CONTROL_PERIOD_US 10000  // 10ms = 10000μs
+#define PID_CONTROL_STACK_SIZE 4096
+#define PID_CONTROL_PRIORITY (configMAX_PRIORITIES - 1)  // Highest priority
+
 // Global variables for servo control
 static uint8_t servo_ids[MAX_SERVOS] = {0};
 static int found_count = 0;
-static pid_controller_t pid_controllers[MAX_SERVOS];
 static QueueHandle_t position_command_queue;
 static dxl_servo_control_t servo_controls[MAX_SERVOS];
 
 // Set logging levels
 #define DYNAMIXEL_LOG_LEVEL ESP_LOG_ERROR  // Only show errors
 #define STATE_MACHINE_LOG_LEVEL ESP_LOG_ERROR  // Only show errors
+
+// Task handle for PID control
+static TaskHandle_t pid_control_task_handle = NULL;
+
+// Timer handle for PID control
+static esp_timer_handle_t pid_timer_handle = NULL;
+
+// Buffer for current positions
+static int32_t current_positions[MAX_SERVOS];
+
+// Shared position buffer with mutex protection
+static struct {
+    int32_t positions[MAX_SERVOS];
+    portMUX_TYPE mutex;
+} shared_positions = {
+    .mutex = portMUX_INITIALIZER_UNLOCKED
+};
+
+// Add after other global variables
+static QueueHandle_t position_report_queue = NULL;
+
+// Timer ISR - minimal, just notifies task
+static void IRAM_ATTR pid_timer_isr(void* arg) {
+    BaseType_t xHigherPriorityTaskWoken = pdFALSE;
+    vTaskNotifyGiveFromISR(pid_control_task_handle, &xHigherPriorityTaskWoken);
+    if (xHigherPriorityTaskWoken) {
+        portYIELD_FROM_ISR();
+    }
+}
+
+// PID Control Task
+static void pid_control_task(void* arg) {
+    // Set task priority to maximum
+    vTaskPrioritySet(NULL, PID_CONTROL_PRIORITY);
+    
+    while (1) {
+        // Wait for notification from timer ISR
+        ulTaskNotifyTake(pdTRUE, portMAX_DELAY);
+        
+        // 1. Read positions
+        for (int i = 0; i < found_count; i++) {
+            if (!state_machine_get_position(servo_ids[i], &current_positions[i])) {
+                ESP_LOGE(TAG, "Failed to read position for servo %d", servo_ids[i]);
+                continue;
+            }
+        }
+        
+        // Update shared position buffer
+        portENTER_CRITICAL(&shared_positions.mutex);
+        for (int i = 0; i < found_count; i++) {
+            shared_positions.positions[i] = current_positions[i];
+        }
+        portEXIT_CRITICAL(&shared_positions.mutex);
+        
+        // 2. Update state machine for PID control
+        state_machine_update();
+    }
+}
+
+static void init_pid_control(void) {
+    // Create PID control task pinned to Core 0
+    BaseType_t ret = xTaskCreatePinnedToCore(
+        pid_control_task,
+        "pid_control",
+        PID_CONTROL_STACK_SIZE,
+        NULL,
+        PID_CONTROL_PRIORITY,
+        &pid_control_task_handle,
+        0  // Pin to Core 0
+    );
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create PID control task");
+        return;
+    }
+    
+    // Create timer for PID control
+    esp_timer_create_args_t timer_args = {
+        .callback = pid_timer_isr,
+        .name = "pid_timer",
+        .dispatch_method = ESP_TIMER_TASK
+    };
+    
+    ESP_ERROR_CHECK(esp_timer_create(&timer_args, &pid_timer_handle));
+    ESP_ERROR_CHECK(esp_timer_start_periodic(pid_timer_handle, PID_CONTROL_PERIOD_US));
+    
+    ESP_LOGI(TAG, "PID control initialized with %dμs period", PID_CONTROL_PERIOD_US);
+}
 
 // Initialize console for input
 static void init_console(void)
@@ -348,7 +444,7 @@ static void process_ik_command(const char* cmd) {
     }
 }
 
-// Add this function before process_gripper_open_command
+// Add this function before the process_gripper_open_command
 static bool recover_from_hardware_error(uint8_t servo_id) {
     ESP_LOGW(TAG, "Attempting to recover from hardware error for servo %d", servo_id);
     
@@ -635,36 +731,7 @@ static void dxl_control_task(void *pvParameters)
                 default: control->target_position = 2048; break;
             }
             
-            // Initialize PID controller with velocity parameters
-            switch (id) {
-                case 1: // Base rotation
-                    init_pid_controller(&pid_controllers[i], MOTOR1_KP, MOTOR1_KI, MOTOR1_KD, MOTOR1_MAX_VELOCITY);
-                    break;
-                case 2: // Shoulder
-                    init_pid_controller(&pid_controllers[i], MOTOR2_KP, MOTOR2_KI, MOTOR2_KD, MOTOR2_MAX_VELOCITY);
-                    break;
-                case 3: // Elbow
-                    init_pid_controller(&pid_controllers[i], MOTOR3_KP, MOTOR3_KI, MOTOR3_KD, MOTOR3_MAX_VELOCITY);
-                    break;
-                case 4: // Wrist
-                    init_pid_controller(&pid_controllers[i], MOTOR4_KP, MOTOR4_KI, MOTOR4_KD, MOTOR4_MAX_VELOCITY);
-                    break;
-                case 5: // Fixed wrist
-                    init_pid_controller(&pid_controllers[i], MOTOR5_KP, MOTOR5_KI, MOTOR5_KD, MOTOR5_MAX_VELOCITY);
-                    break;
-                case 6: // Gripper - No PID, using PWM control
-                    // Skip PID initialization for gripper
-                    break;
-            }
-            
-            // Only set PID target for non-gripper motors
-            if (id != 6) {
-                pid_controllers[i].target = control->target_position;
-            }
-            
-            ESP_LOGI(TAG, "Servo ID %d initialized%s", 
-                     id, 
-                     (id == 6) ? " with PWM control" : " with max velocity");
+            ESP_LOGI(TAG, "Servo ID %d initialized", id);
         }
         
         // Main control loop
@@ -685,33 +752,66 @@ static void dxl_control_task(void *pvParameters)
     vTaskDelete(NULL);
 }
 
-// Add before app_main
-static void position_report_callback(void* arg)
-{
-    // Read and send positions for all servos
-    printf("J");  // 'J' prefix for joint positions
+// Position reporting task
+static void position_report_task(void* arg) {
+    int32_t positions[MAX_SERVOS];
     
-    for (int i = 1; i <= 6; i++) {
-        int32_t position;
-        if (state_machine_get_position(i, &position)) {
-            printf("%" PRId32, position);
-        } else {
-            printf("2048"); // Use default if read fails
-        }
-        
-        // Add comma except for the last item
-        if (i < 6) {
-            printf(",");
+    while (1) {
+        if (xQueueReceive(position_report_queue, positions, portMAX_DELAY)) {
+            printf("J");  // 'J' prefix for joint positions
+            
+            for (int i = 0; i < found_count; i++) {
+                printf("%" PRId32, positions[i]);
+                if (i < found_count - 1) {
+                    printf(",");
+                }
+            }
+            printf("\n");
         }
     }
+}
+
+// Update position reporting callback to use queue
+static void position_report_callback(void* arg) {
+    int32_t positions[MAX_SERVOS];
     
-    printf("\n");
+    // Copy positions from shared buffer
+    portENTER_CRITICAL(&shared_positions.mutex);
+    for (int i = 0; i < found_count; i++) {
+        positions[i] = shared_positions.positions[i];
+    }
+    portEXIT_CRITICAL(&shared_positions.mutex);
+    
+    // Send to queue
+    xQueueSendFromISR(position_report_queue, positions, NULL);
 }
 
 static void init_position_reporting(void)
 {
-    esp_timer_handle_t timer_handle;
+    // Create position report queue
+    position_report_queue = xQueueCreate(POSITION_REPORT_QUEUE_SIZE, sizeof(int32_t) * MAX_SERVOS);
+    if (position_report_queue == NULL) {
+        ESP_LOGE(TAG, "Failed to create position report queue");
+        return;
+    }
     
+    // Create position report task
+    BaseType_t ret = xTaskCreate(
+        position_report_task,
+        "pos_report",
+        POSITION_REPORT_STACK_SIZE,
+        NULL,
+        POSITION_REPORT_PRIORITY,
+        NULL
+    );
+    
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create position report task");
+        return;
+    }
+    
+    // Create timer for position reporting
+    esp_timer_handle_t timer_handle;
     esp_timer_create_args_t timer_args = {
         .callback = position_report_callback,
         .name = "position_report",
@@ -749,5 +849,8 @@ void app_main(void)
     
     // Initialize position reporting using esp_timer
     init_position_reporting();
+
+    // Initialize PID control
+    init_pid_control();
 }
 
