@@ -3,7 +3,7 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
                              QLineEdit, QMessageBox, QComboBox, QFrame,
                              QSlider, QGroupBox, QSpacerItem, QSizePolicy)
-from PySide6.QtCore import Slot, Qt, QProcess, QTimer
+from PySide6.QtCore import Slot, Qt, QProcess, QTimer, QDateTime
 from PySide6.QtGui import QColor, QTextCursor
 import serial.tools.list_ports
 import serial
@@ -15,11 +15,23 @@ class MainWindow(QMainWindow):
         
         # Initialize serial connection
         self.serial_connection = None
+        self.last_connected_port = None  # Store the last connected port
         
         # Initialize position reading timer
         self.position_timer = QTimer()
         self.position_timer.timeout.connect(self.read_positions)
         self.position_timer.start(100)  # Read every 100ms
+        
+        # Initialize connection timeout timer (but don't start it yet)
+        self.connection_timeout = QTimer()
+        self.connection_timeout.timeout.connect(self.check_connection)
+        
+        # Initialize reconnection timer
+        self.reconnect_timer = QTimer()
+        self.reconnect_timer.timeout.connect(self.attempt_reconnect)
+        
+        # Track last position update time
+        self.last_position_update = QDateTime.currentMSecsSinceEpoch()
         
         # Set window properties
         self.setWindowTitle("ME135 Control Panel")
@@ -484,6 +496,14 @@ class MainWindow(QMainWindow):
         """Handle port selection change"""
         self.port_display.setText(port)
         
+        # Stop the connection timeout timer if it's running
+        if self.connection_timeout.isActive():
+            self.connection_timeout.stop()
+        
+        # Stop reconnection attempts
+        if self.reconnect_timer.isActive():
+            self.reconnect_timer.stop()
+        
         # Close existing connection if any
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
@@ -496,6 +516,12 @@ class MainWindow(QMainWindow):
                 baudrate=115200,
                 timeout=1
             )
+            
+            # Store the successfully connected port
+            self.last_connected_port = port
+            
+            # Start the connection timeout timer
+            self.connection_timeout.start(500)  # Check every 500ms
             
             # Update connection status
             self.connection_status.setStyleSheet("""
@@ -623,6 +649,51 @@ class MainWindow(QMainWindow):
             self.console_output.append(f"Error sending command: {str(e)}")
             return False
 
+    def check_connection(self):
+        """Check if we've received a position update recently"""
+        current_time = QDateTime.currentMSecsSinceEpoch()
+        if current_time - self.last_position_update > 500:  # Changed from 200 to 500
+            # No position update received in the last 500ms
+            self.connection_status.setStyleSheet("""
+                QFrame {
+                    background-color: red;
+                    border-radius: 30px;
+                    border: 2px solid #666;
+                }
+            """)
+            if self.serial_connection and self.serial_connection.is_open:
+                self.console_output.append("Connection lost - No position updates received")
+                self.serial_connection.close()
+                self.serial_connection = None
+                # Stop the connection timeout timer
+                self.connection_timeout.stop()
+
+    def attempt_reconnect(self):
+        """Attempt to reconnect to the last known port"""
+        if not self.last_connected_port:
+            self.reconnect_timer.stop()
+            return
+            
+        try:
+            # Try to create new serial connection
+            self.serial_connection = serial.Serial(
+                port=self.last_connected_port,
+                baudrate=115200,
+                timeout=1
+            )
+            
+            # If successful, stop reconnection attempts and start connection monitoring
+            self.reconnect_timer.stop()
+            self.connection_timeout.start(500)
+            self.console_output.append(f"Reconnected to port: {self.last_connected_port}")
+            
+        except Exception as e:
+            # Connection failed, keep trying
+            self.console_output.append(f"Reconnection attempt failed: {str(e)}")
+            if self.serial_connection:
+                self.serial_connection.close()
+                self.serial_connection = None
+
     def read_positions(self):
         """Read current joint positions from serial buffer"""
         if not self.serial_connection or not self.serial_connection.is_open:
@@ -635,6 +706,18 @@ class MainWindow(QMainWindow):
                 
                 # Check if this is a joint position update (starts with 'J')
                 if line.startswith('J'):
+                    # Update last position update time
+                    self.last_position_update = QDateTime.currentMSecsSinceEpoch()
+                    
+                    # Update connection status to connected
+                    self.connection_status.setStyleSheet("""
+                        QFrame {
+                            background-color: green;
+                            border-radius: 30px;
+                            border: 2px solid #666;
+                        }
+                    """)
+                    
                     # Parse positions
                     positions = line[1:].split(',')  # Remove 'J' prefix and split
                     if len(positions) >= 6:  # We expect 6 positions
@@ -658,6 +741,17 @@ class MainWindow(QMainWindow):
                             
         except Exception as e:
             self.console_output.append(f"Error reading positions: {str(e)}")
+            # Update connection status to disconnected on error
+            self.connection_status.setStyleSheet("""
+                QFrame {
+                    background-color: red;
+                    border-radius: 30px;
+                    border: 2px solid #666;
+                }
+            """)
+            if self.serial_connection and self.serial_connection.is_open:
+                self.serial_connection.close()
+                self.serial_connection = None
 
 def main():
     # Create the Qt Application

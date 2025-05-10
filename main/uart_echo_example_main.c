@@ -47,13 +47,13 @@
 
 // Add after other defines
 #define POSITION_CONTROL_STACK_SIZE 8192
-#define POSITION_CONTROL_PRIORITY 5
+#define POSITION_CONTROL_PRIORITY 3  // Lower priority, not realtime
 #define POSITION_CONTROL_PERIOD_MS 100
 #define USER_INPUT_STACK_SIZE 8192
-#define USER_INPUT_PRIORITY 6
+#define USER_INPUT_PRIORITY 2  // Lower priority, not realtime
 #define USER_INPUT_PERIOD_MS 10
 #define POSITION_REPORT_STACK_SIZE 4096
-#define POSITION_REPORT_PRIORITY 4
+#define POSITION_REPORT_PRIORITY 1  // Lower priority, not realtime
 #define POSITION_REPORT_PERIOD_US 100000  // 100ms in microseconds
 #define POSITION_REPORT_QUEUE_SIZE 10
 
@@ -404,7 +404,6 @@ static void process_ik_command(const char* cmd) {
     }
     
     if (num_sets == 0) {
-        printf("ERROR: No angle sets provided\n");
         return;
     }
     
@@ -415,12 +414,8 @@ static void process_ik_command(const char* cmd) {
                               &angles[0], &angles[1], &angles[2], &angles[3]);
         
         if (num_angles != 4) {  // We need exactly 4 angles
-            printf("ERROR: Invalid angle set format. Expected 4 angles\n");
             continue;
         }
-        
-        printf("Moving to joint angles: %.2f,%.2f,%.2f,%.2f\n", 
-               angles[0], angles[1], angles[2], angles[3]);
         
         // Convert angles to positions and move servos
         int positions[4];
@@ -436,7 +431,6 @@ static void process_ik_command(const char* cmd) {
             char servo_cmd[16];
             snprintf(servo_cmd, sizeof(servo_cmd), "S%dP%d", i+1, positions[i]);
             process_servo_command(servo_cmd);
-            printf("Joint %d: angle=%.2f° -> position=%d\n", i+1, angles[i], positions[i]);
         }
         
         // Wait for servos to reach position
@@ -795,7 +789,7 @@ static void init_position_reporting(void)
         return;
     }
     
-    // Create position report task
+    // Create position report task (no core pinning)
     BaseType_t ret = xTaskCreate(
         position_report_task,
         "pos_report",
@@ -843,14 +837,14 @@ void app_main(void)
     ESP_LOGI(TAG, "Using UART%d: TX=%d, RX=%d, DIR=%d, Baudrate=%d", 
              DXL_UART_NUM, DXL_TX_PIN, DXL_RX_PIN, DXL_DIR_PIN, (int)DXL_BAUDRATE);
     
-    // Create tasks with adjusted priorities and stack sizes
+    // Create tasks with adjusted priorities (no core pinning for UART tasks)
     xTaskCreate(user_input_task, "user_input", USER_INPUT_STACK_SIZE, NULL, USER_INPUT_PRIORITY, NULL);
     xTaskCreate(dxl_control_task, "dxl_control", POSITION_CONTROL_STACK_SIZE, NULL, POSITION_CONTROL_PRIORITY, NULL);
     
     // Initialize position reporting using esp_timer
     init_position_reporting();
 
-    // Initialize PID control
+    // Initialize PID control (this remains realtime)
     init_pid_control();
 }
 
