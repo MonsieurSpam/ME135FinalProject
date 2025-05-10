@@ -87,6 +87,12 @@ class SO100Arm:
             # Extract position and rotation
             position = transformation_matrix[0:3, 3]
             rotation = transformation_matrix[0:3, 0:3]
+            
+            # Enforce minimum height constraint
+            min_height = 0.02  # Minimum height in meters
+            if position[2] < min_height:
+                position[2] = min_height
+                
             return position, rotation, transformation_matrix
         except Exception as e:
             print(f"Error in forward kinematics calculation: {e}")
@@ -132,6 +138,11 @@ class SO100Arm:
                 # Get current end effector position and orientation
                 achieved_position, achieved_rotation, _ = self.forward_kinematics(joint_angles[1:6])
                 
+                # Verify minimum height constraint
+                if achieved_position[2] < min_height:
+                    print(f"Warning: Achieved height {achieved_position[2]}m is below minimum {min_height}m")
+                    continue
+                
                 # Calculate the angle needed to point downward
                 # Current Z axis of the end effector
                 current_z = achieved_rotation[:, 2]
@@ -146,6 +157,12 @@ class SO100Arm:
                 
                 # Verify the solution
                 achieved_position, achieved_rotation, _ = self.forward_kinematics(joint_angles[1:6])
+                
+                # Verify minimum height constraint again after wrist adjustment
+                if achieved_position[2] < min_height:
+                    print(f"Warning: Final height {achieved_position[2]}m is below minimum {min_height}m")
+                    continue
+                
                 pos_error = np.linalg.norm(np.array(target_position) - achieved_position)
                 
                 # Calculate orientation error (dot product between desired and achieved Z axes)

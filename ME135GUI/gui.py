@@ -1,4 +1,5 @@
 import sys
+import os
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
                              QHBoxLayout, QPushButton, QLabel, QTextEdit, 
                              QLineEdit, QMessageBox, QComboBox, QFrame,
@@ -9,13 +10,25 @@ import serial.tools.list_ports
 import serial
 import math
 
+# Add parent directory to path to import computer vision module
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from computer_vision.final_detection_realtime import stablized_centers
+from so100_ik_control import SO100IKControl
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
+        # Initialize IK control
+        self.ik_control = None
+        
         # Initialize serial connection
         self.serial_connection = None
-        self.last_connected_port = None  # Store the last connected port
+        self.last_connected_port = None
+        
+        # Store detected positions
+        self.detected_red_position = None
+        self.detected_blue_position = None
         
         # Initialize position reading timer
         self.position_timer = QTimer()
@@ -447,13 +460,12 @@ class MainWindow(QMainWindow):
         
         # Connect action buttons
         self.gripper_button.clicked.connect(self.toggle_gripper)
-        self.find_red.clicked.connect(lambda: self.execute_command("find_red"))
-        self.find_blue.clicked.connect(lambda: self.execute_command("find_blue"))
-        self.pick_place.clicked.connect(lambda: self.execute_command("pick_and_place"))
+        self.find_red.clicked.connect(self.find_red_cube)
+        self.find_blue.clicked.connect(self.find_blue_cube)
+        self.pick_place.clicked.connect(self.execute_pick_and_place)
         self.home_button.clicked.connect(lambda: self.send_serial_command("C"))
         self.demo_button.clicked.connect(lambda: self.send_serial_command("d"))
 
-    
     @Slot(int)
     def toggle_mode(self, value):
         """Toggle between teleop and auto modes"""
@@ -491,6 +503,84 @@ class MainWindow(QMainWindow):
             self.y_coord.setEnabled(False)
             self.z_coord.setEnabled(False)
     
+    def find_red_cube(self):
+        """Find and store the position of the red cube"""
+        try:
+            self.console_output.append("Searching for red cube...")
+            position = stablized_centers(override_color='red')
+            position[1] = position[1] + 0.02 
+            position[2] = position[2] + 0.05
+            if position is not None:
+                self.detected_red_position = position
+                self.console_output.append(f"Red cube found at: {position}")
+            else:
+                self.console_output.append("No red cube detected")
+        except Exception as e:
+            self.console_output.append(f"Error finding red cube: {str(e)}")
+
+    def find_blue_cube(self):
+        """Find and store the position of the blue cube"""
+        try:
+            self.console_output.append("Searching for blue cube...")
+            position = stablized_centers(override_color='blue')
+            position[1] = position[1] + 0.02 
+            position[2] = position[2] + 0.05
+            if position is not None:
+                self.detected_blue_position = position
+                self.console_output.append(f"Blue cube found at: {position}")
+            else:
+                self.console_output.append("No blue cube detected")
+        except Exception as e:
+            self.console_output.append(f"Error finding blue cube: {str(e)}")
+
+    def execute_pick_and_place(self):
+        """Execute pick and place sequence using detected position and user-specified place position"""
+        if not self.serial_connection or not self.serial_connection.is_open:
+            self.console_output.append("Error: Not connected to any port")
+            return
+
+        try:
+            # Get place position from user input
+            try:
+                place_x = float(self.x_coord.text())
+                place_y = float(self.y_coord.text())
+                place_z = float(self.z_coord.text())
+            except ValueError:
+                self.console_output.append("Error: Invalid place position coordinates")
+                return
+
+            place_position = [place_x, place_y, place_z]
+
+            # Determine which cube to pick based on which was last detected
+            if self.detected_red_position is not None:
+                pick_position = self.detected_red_position
+                self.console_output.append("Using red cube position for pick")
+            elif self.detected_blue_position is not None:
+                pick_position = self.detected_blue_position
+                self.console_output.append("Using blue cube position for pick")
+            else:
+                self.console_output.append("Error: No cube position detected. Please find a cube first.")
+                return
+
+            # Initialize IK control if not already done
+            if self.ik_control is None:
+                self.ik_control = SO100IKControl(port=self.last_connected_port)
+                if not self.ik_control.connect():
+                    self.console_output.append("Error: Failed to initialize IK control")
+                    return
+
+            # Execute pick and place sequence
+            self.console_output.append("Executing pick and place sequence...")
+            success = self.ik_control.execute_pick_and_place(pick_position, place_position)
+            
+            if success:
+                self.console_output.append("Pick and place sequence completed successfully!")
+            else:
+                self.console_output.append("Pick and place sequence failed!")
+
+        except Exception as e:
+            self.console_output.append(f"Error during pick and place: {str(e)}")
+
     @Slot(str)
     def port_changed(self, port):
         """Handle port selection change"""
@@ -500,14 +590,15 @@ class MainWindow(QMainWindow):
         if self.connection_timeout.isActive():
             self.connection_timeout.stop()
         
-        # Stop reconnection attempts
-        if self.reconnect_timer.isActive():
-            self.reconnect_timer.stop()
-        
         # Close existing connection if any
         if self.serial_connection and self.serial_connection.is_open:
             self.serial_connection.close()
             self.serial_connection = None
+        
+        # Close IK control if it exists
+        if self.ik_control:
+            self.ik_control.disconnect()
+            self.ik_control = None
         
         try:
             # Create new serial connection
@@ -667,6 +758,9 @@ class MainWindow(QMainWindow):
                 self.serial_connection = None
                 # Stop the connection timeout timer
                 self.connection_timeout.stop()
+                # Start reconnection attempts
+                if self.last_connected_port:
+                    self.reconnect_timer.start(1000)  # Try to reconnect every second
 
     def attempt_reconnect(self):
         """Attempt to reconnect to the last known port"""
@@ -740,18 +834,21 @@ class MainWindow(QMainWindow):
                             pass
                             
         except Exception as e:
-            self.console_output.append(f"Error reading positions: {str(e)}")
-            # Update connection status to disconnected on error
-            self.connection_status.setStyleSheet("""
-                QFrame {
-                    background-color: red;
-                    border-radius: 30px;
-                    border: 2px solid #666;
-                }
-            """)
+            # Only log the error if it's not a temporary connection issue
+            if not isinstance(e, (serial.SerialException, serial.SerialTimeoutException)):
+                self.console_output.append(f"Error reading positions: {str(e)}")
+            
+            # Don't immediately close the connection on error
+            # Instead, let the connection timeout handler deal with it
             if self.serial_connection and self.serial_connection.is_open:
-                self.serial_connection.close()
-                self.serial_connection = None
+                # Just update the status to indicate potential issues
+                self.connection_status.setStyleSheet("""
+                    QFrame {
+                        background-color: yellow;
+                        border-radius: 30px;
+                        border: 2px solid #666;
+                    }
+                """)
 
 def main():
     # Create the Qt Application

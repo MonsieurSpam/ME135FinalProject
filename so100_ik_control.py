@@ -191,9 +191,7 @@ class SO100IKControl:
             
             # 2. Open gripper
             print("\n=== Step 2: Opening gripper ===")
-            if not self.open_gripper():
-                print("Error: Failed to open gripper")
-                return False
+            self.serial.write(b"O\n")
             time.sleep(1)  # Wait for gripper to open
             
             # 3. Move to approach position above pick location
@@ -216,9 +214,7 @@ class SO100IKControl:
             
             # 5. Close gripper
             print("\n=== Step 5: Closing gripper ===")
-            if not self.close_gripper():
-                print("Error: Failed to close gripper")
-                return False
+            self.serial.write(b"G\n")
             time.sleep(1)  # Wait for gripper to close
             
             # 6. Raise with object
@@ -252,9 +248,7 @@ class SO100IKControl:
             
             # 9. Open gripper
             print("\n=== Step 10: Opening gripper to release object ===")
-            if not self.open_gripper():
-                print("Error: Failed to open gripper")
-                return False
+            self.serial.write(b"O\n")
             time.sleep(1)  # Wait for gripper to open
             
             # 10. Raise arm

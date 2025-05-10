@@ -75,7 +75,7 @@ def main(config, override_color=None):
         raise ValueError("Color must be 'red' or 'blue'")
     lower, upper = COLOR_RANGES[color]
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         raise RuntimeError("Could not open camera.")
     
@@ -117,7 +117,7 @@ def stablized_centers(config=CONFIG, override_color=None):
         raise ValueError("Color must be 'red' or 'blue'")
     lower, upper = COLOR_RANGES[color]
 
-    cap = cv2.VideoCapture(0)
+    cap = cv2.VideoCapture(1)
     if not cap.isOpened():
         raise RuntimeError("Could not open camera.")
     
